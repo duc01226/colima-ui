@@ -179,6 +179,16 @@ jobs:
           # keypair strands every already-released install.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Optional Apple Developer signing / notarization. If these secrets are
+          # present, the DMG will be signed and notarized, avoiding the macOS
+          # Gatekeeper "app is damaged" warning on Apple Silicon. If they are
+          # absent, the action builds an unsigned DMG as before.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: 'ColimaUI v${{ needs.prepare.outputs.version }}'
@@ -195,6 +205,11 @@ jobs:
             | **macOS Intel** | `ColimaUI_*_x64.dmg` | Intel Macs |
             | **Linux** | `ColimaUI_*_amd64.deb` | Ubuntu/Debian |
             | **Linux** | `ColimaUI_*_amd64.AppImage` | Universal Linux |
+
+            ### 🍎 macOS Gatekeeper
+            Pre-built DMGs are unsigned unless Apple Developer secrets are configured in the repository. If macOS reports *"ColimaUI.app is damaged and can't be opened"*, either:
+            - Go to **System Settings → Privacy & Security** and click **Open Anyway**.
+            - Run `xattr -cr /Applications/ColimaUI.app` after dragging the app to Applications.
 
             ### 🌐 Browser Mode
             After launching the app, access the web UI at `http://127.0.0.1:11420`

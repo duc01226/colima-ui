@@ -31,6 +31,13 @@ Grab the latest release from [**GitHub Releases**](https://github.com/vnknowledg
 | **Linux** (Debian/Ubuntu) | `ColimaUI_*_amd64.deb` | x86_64 |
 | **Linux** (Universal) | `ColimaUI_*_amd64.AppImage` | x86_64 |
 
+> **macOS Gatekeeper:** Pre-built DMGs are currently unsigned. If macOS shows
+> *"ColimaUI.app is damaged and can't be opened"*, open **System Settings →
+> Privacy & Security** and click **Open Anyway**, or run
+> `xattr -cr /Applications/ColimaUI.app` after dragging the app to Applications.
+> This removes the download quarantine flag and is only needed for the
+> downloaded build, not for locally compiled apps.
+
 > **Browser mode:** After launching the app, access the full web UI at `http://127.0.0.1:11420` from any browser.
 
 ---
