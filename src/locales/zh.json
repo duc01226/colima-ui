@@ -243,6 +243,7 @@
     "session_ended": "会话已结束 (退出码: {code})"
   },
   "compose": {
+    "stop": "停止",
     "diagnose": {
       "tab": "诊断",
       "run": "分析",

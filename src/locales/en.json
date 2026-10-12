@@ -243,6 +243,7 @@
     "session_ended": "Session ended (exit code: {code})"
   },
   "compose": {
+    "stop": "Stop",
     "diagnose": {
       "tab": "Diagnose",
       "run": "Analyze",

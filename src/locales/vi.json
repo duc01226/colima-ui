@@ -243,6 +243,7 @@
     "session_ended": "Phiên đã kết thúc (mã thoát: {code})"
   },
   "compose": {
+    "stop": "Dừng",
     "diagnose": {
       "tab": "Chẩn đoán",
       "run": "Phân tích",

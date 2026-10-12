@@ -243,6 +243,7 @@
     "session_ended": "セッションが終了しました (終了コード: {code})"
   },
   "compose": {
+    "stop": "停止",
     "diagnose": {
       "tab": "診断",
       "run": "解析",
