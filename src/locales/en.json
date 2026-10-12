@@ -552,5 +552,9 @@
     "rules_count": "{count} rules",
     "none_acting": "none act on their own",
     "some_acting": "{count} act on their own"
+  },
+  "docker": {
+    "unsupported_runtime": "{runtime} runtime is not supported ({profiles})",
+    "unsupported_runtime_hint": "ColimaUI requires the Docker runtime. Stop the profile and run: colima start --runtime docker"
   }
 }

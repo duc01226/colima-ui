@@ -552,5 +552,9 @@
     "rules_count": "{count} 件のルール",
     "none_acting": "自動実行するものはありません",
     "some_acting": "{count} 件が自動実行します"
+  },
+  "docker": {
+    "unsupported_runtime": "{runtime} ランタイムはサポートされていません ({profiles})",
+    "unsupported_runtime_hint": "ColimaUI には Docker ランタイムが必要です。プロファイルを停止して `colima start --runtime docker` を実行してください"
   }
 }
