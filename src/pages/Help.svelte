@@ -139,7 +139,7 @@
   ]);
 </script>
 
-<div class="content-header">
+<div class="content-header" data-tauri-drag-region>
   <div>
     <h1 class="page-title">{t("help.title", { default: "Help" })}</h1>
     <div class="page-subtitle" style="font-size: var(--text-sm); color: var(--text-secondary); margin-top: 4px;">
