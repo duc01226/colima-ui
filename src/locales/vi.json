@@ -552,5 +552,9 @@
     "rules_count": "{count} quy tắc",
     "none_acting": "không quy tắc nào tự hành động",
     "some_acting": "{count} quy tắc tự hành động"
+  },
+  "docker": {
+    "unsupported_runtime": "Runtime {runtime} không được hỗ trợ ({profiles})",
+    "unsupported_runtime_hint": "ColimaUI yêu cầu runtime Docker. Dừng profile và chạy: `colima start --runtime docker`"
   }
 }

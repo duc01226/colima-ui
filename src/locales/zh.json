@@ -552,5 +552,9 @@
     "rules_count": "{count} 条规则",
     "none_acting": "没有规则会自动执行",
     "some_acting": "{count} 条规则会自动执行"
+  },
+  "docker": {
+    "unsupported_runtime": "不支持 {runtime} 运行时 ({profiles})",
+    "unsupported_runtime_hint": "ColimaUI 需要 Docker 运行时。停止配置文件并运行：`colima start --runtime docker`"
   }
 }

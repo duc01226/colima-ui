@@ -5,6 +5,8 @@ import { normalizeContainer, normalizeImage } from "./normalizers";
 import { dockerState, resourceState, dashboardState, isEventCooldownActive, uiState } from "../store.svelte";
 import { getAppSetting } from "./settingsStore.svelte";
 import { setVisibleInterval } from "./visibleInterval";
+import { globalToast } from "./globalToast";
+import { t } from "./i18n.svelte";
 
 import { isRunningInTauri } from "./env";
 const isTauri = isRunningInTauri();
@@ -104,6 +106,24 @@ function handleConnectionLost() {
   resourceState.networksLoading = true;
 }
 
+function showUnsupportedRuntimeToast(payload: { runtime?: string; profiles?: string[] }) {
+  const runtime = payload.runtime || "containerd";
+  const profiles = payload.profiles?.join(", ") || "unknown";
+  globalToast(
+    "error",
+    t("docker.unsupported_runtime", {
+      default: "{runtime} runtime is not supported",
+      runtime,
+      profiles,
+    }),
+    {
+      hint: t("docker.unsupported_runtime_hint", {
+        default: "ColimaUI requires the Docker runtime. Stop the profile and run: colima start --runtime docker",
+      }),
+    }
+  );
+}
+
 export function startDataPoller() {
   // A second start after a teardown (HMR, or a re-mounted root) must not
   // inherit the previous run's disposed flag or its retry count.
@@ -136,6 +156,9 @@ export function startDataPoller() {
       );
       mod.listen("docker-connection-lost", handleConnectionLost);
       mod.listen("docker-reconnected", refetchAllResources);
+      mod.listen("docker-unsupported-runtime", (event: { payload: { runtime?: string; profiles?: string[] } }) =>
+        showUnsupportedRuntimeToast(event.payload)
+      );
       // Tray menu navigation (container click / Help) drives the active page.
       mod.listen("navigate", (event: { payload?: { page?: unknown } }) => {
         const page = event.payload?.page;
@@ -190,6 +213,13 @@ export function startDataPoller() {
       });
       es.addEventListener("docker-connection-lost", handleConnectionLost);
       es.addEventListener("docker-reconnected", refetchAllResources);
+      es.addEventListener("docker-unsupported-runtime", (e: MessageEvent) => {
+        try {
+          showUnsupportedRuntimeToast(JSON.parse(e.data) as { runtime?: string; profiles?: string[] });
+        } catch {
+          // A malformed SSE frame is ignored; the next update will retry.
+        }
+      });
       es.onopen = () => {
         sseRetryDelay = 2000;
         if (stopPolling) {
