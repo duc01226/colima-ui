@@ -248,6 +248,7 @@ pub fn run() {
             compose::compose_up,
             compose::compose_down,
             compose::compose_restart,
+            compose::compose_stop,
             compose::compose_logs,
             compose::compose_ps,
             compose_diagnose::compose_validate,

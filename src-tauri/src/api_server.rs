@@ -178,6 +178,7 @@ pub fn build_router() -> Router {
         .route("/api/compose/up", post(api_compose_up))
         .route("/api/compose/down", post(api_compose_down))
         .route("/api/compose/restart", post(api_compose_restart))
+        .route("/api/compose/stop", post(api_compose_stop))
         .route("/api/compose/logs", get(api_compose_logs))
         .route("/api/compose/ps", get(api_compose_ps))
         .route("/api/compose/diagnose", post(api_compose_diagnose))
