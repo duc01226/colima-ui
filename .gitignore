@@ -45,3 +45,7 @@ plans/
 AGENTS.md
 CLAUDE.md
 CHECKLIST.md
+
+# Disposable generated evidence and scratch output
+/tmp/
+/temp/

@@ -1,0 +1,189 @@
+{
+  "project": {
+    "name": "ColimaUI",
+    "description": "Desktop and browser GUI for Colima, Docker, Kubernetes, Lima virtual machines and AI diagnostics.",
+    "languages": [
+      "TypeScript",
+      "Rust"
+    ]
+  },
+  "framework": {
+    "name": "Svelte 5 + Tauri 2 / Axum",
+    "frontendPatternsDoc": "docs/frontend-patterns-reference.md",
+    "backendPatternsDoc": "docs/backend-patterns-reference.md",
+    "codeReviewDoc": "docs/code-review-rules.md",
+    "integrationTestDoc": "docs/integration-test-reference.md"
+  },
+  "modules": [
+    {
+      "name": "frontend",
+      "kind": "frontend",
+      "pathRegex": "^src[\\\\/]",
+      "description": "Svelte pages, shared components, rune stores and the dual-mode API client."
+    },
+    {
+      "name": "backend",
+      "kind": "backend",
+      "pathRegex": "^src-tauri[\\\\/]",
+      "description": "Rust/Tauri application, Axum HTTP routes, shared commands, adapters, services and CLI binaries."
+    }
+  ],
+  "testing": {
+    "frameworks": [
+      "Vitest",
+      "Rust test harness"
+    ],
+    "filePatterns": {
+      "unit": "src/**/*.test.ts",
+      "integration": "src-tauri/tests/*.rs"
+    },
+    "commands": {
+      "dev": "npm run dev",
+      "desktopDev": "npm run tauri dev",
+      "build": "npm run build",
+      "desktopBuild": "npm run tauri build",
+      "lint": "npm run lint",
+      "typecheck": "npm run typecheck",
+      "svelteCheck": "npm run check",
+      "cssTokens": "npm run check:tokens",
+      "localization": "npm run check:i18n",
+      "unit": "npm test",
+      "rustUnit": "cargo test --manifest-path src-tauri/Cargo.toml --lib",
+      "rustLint": "npm run lint:rust"
+    },
+    "commandsNote": "Node.js >=22.22.2 is required. npm commands match package scripts, Tauri config and CI; README also documents pnpm, and both lockfiles exist, so no startup package-manager preference is selected. Rust integration tests may require Docker, Colima or Trivy and may carry #[ignore]; choose their prerequisites before running them. Run the repository's quality gates before committing or pushing; see README.md.",
+    "guideDoc": "README.md"
+  },
+  "docsRoots": {
+    "projectReference": {
+      "path": "docs"
+    }
+  },
+  "referenceDocs": [
+    {
+      "filename": "architecture.md",
+      "purpose": "Before changing application boundaries or transport behavior — dual-mode architecture and data flow",
+      "scanTarget": "manual"
+    },
+    {
+      "filename": "frontend.md",
+      "purpose": "Before editing Svelte pages, shared controls, stores or styling — frontend conventions and ownership",
+      "scanTarget": "manual"
+    },
+    {
+      "filename": "backend.md",
+      "purpose": "Before changing Rust commands, HTTP routes, adapters or services — backend patterns and validation ownership",
+      "scanTarget": "manual"
+    },
+    {
+      "filename": "api.md",
+      "purpose": "Before changing HTTP endpoints or client contracts — API reference and request behavior",
+      "scanTarget": "manual"
+    },
+    {
+      "filename": "ai.md",
+      "purpose": "Before changing AI diagnostics, tools, knowledge bank or command sandbox — AI system behavior",
+      "scanTarget": "manual"
+    },
+    {
+      "filename": "topology-design-philosophy.md",
+      "purpose": "Before adding topology node kinds or actions — topology design rules and interaction boundaries",
+      "scanTarget": "manual"
+    },
+    {
+      "filename": "telemetry.md",
+      "purpose": "Before changing telemetry or outbound data — data disclosure and transmission behavior",
+      "scanTarget": "manual"
+    },
+    {
+      "filename": "project-structure-reference.md",
+      "purpose": "Before planning changes or tracing entry points — source-derived project structure, runtime and delivery"
+    },
+    {
+      "filename": "backend-patterns-reference.md",
+      "purpose": "Before editing backend behavior — source-derived request, validation, persistence and asynchronous patterns"
+    },
+    {
+      "filename": "frontend-patterns-reference.md",
+      "purpose": "Before editing frontend behavior — source-derived composition, state, input and navigation conventions"
+    },
+    {
+      "filename": "design-system/README.md",
+      "purpose": "Before changing visual styles or shared controls — source-derived design tokens, components and assets"
+    },
+    {
+      "filename": "code-review-rules.md",
+      "purpose": "Before reviewing project changes — source-backed quality gates and local review rules"
+    },
+    {
+      "filename": "domain-entities-reference.md",
+      "purpose": "Before changing resource lifecycle or safety rules — executable domain concepts, ownership and invariants"
+    },
+    {
+      "filename": "integration-test-reference.md",
+      "purpose": "Before changing boundary tests — source-derived harness, isolation, prerequisites and assertions"
+    },
+    {
+      "filename": "seed-test-data-reference.md",
+      "purpose": "Before changing fixture or sample-data setup — actual loaders, corpus generators and bootstrap ownership"
+    }
+  ],
+  "experienceVerification": {
+    "enabled": true,
+    "evidenceRoot": "tmp/experience-review",
+    "baselineRoot": "docs/experience-baselines",
+    "acceptancePolicy": "manual-acceptance-required",
+    "reviewOn": [
+      "new-surface",
+      "changed-surface",
+      "bugfix",
+      "baseline-mismatch"
+    ],
+    "surfaces": [
+      {
+        "id": "web",
+        "kind": "web",
+        "runner": "Vite and a browser",
+        "entryPoints": [
+          "http://localhost:1420"
+        ],
+        "localRun": {
+          "startCommand": "npm run dev",
+          "readyCheck": "http://localhost:1420"
+        },
+        "notes": "Vite serves the frontend; application operations also need the Rust backend running. The HTTP client discovers API ports 11420-11429. See vite.config.ts, src/lib/api/client.ts and docs/architecture.md."
+      },
+      {
+        "id": "desktop",
+        "kind": "desktop",
+        "runner": "Tauri native window",
+        "entryPoints": [
+          "npm run tauri dev"
+        ],
+        "localRun": {
+          "startCommand": "npm run tauri dev"
+        },
+        "notes": "Requires frontend dependencies, Rust/Tauri build prerequisites and native UI inspection. Backend resource actions additionally depend on the relevant local runtime tools. See README.md and src-tauri/tauri.conf.json."
+      },
+      {
+        "id": "http-api",
+        "kind": "api",
+        "runner": "HTTP client against the running Axum server",
+        "entryPoints": [
+          "GET /api/health"
+        ],
+        "notes": "Start the application to host the server; discover its actual port in 11420-11429. Health is unauthenticated; protected operations use the local API-token reference described in src-tauri/src/auth.rs. Never copy token values into evidence. See src-tauri/src/api_server.rs and docs/api.md."
+      },
+      {
+        "id": "cli",
+        "kind": "terminal",
+        "runner": "Native CLI binaries",
+        "entryPoints": [
+          "colimaui --help",
+          "cui <prompt>"
+        ],
+        "notes": "colimaui is declared with required-features = [cli] in src-tauri/Cargo.toml; cui is a Rust binary in src-tauri/src/bin/cui.rs and needs the running backend for requests. Rust and native build prerequisites are required. No full verification suite or accepted output baseline is declared."
+      }
+    ]
+  }
+}

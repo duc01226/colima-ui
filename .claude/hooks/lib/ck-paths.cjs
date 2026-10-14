@@ -1,0 +1,213 @@
+#!/usr/bin/env node
+'use strict';
+
+/**
+ * ClaudeKit Paths - Centralized path constants for all temporary/runtime files
+ *
+ * All ClaudeKit temp files consolidated under the OS temp `ck` namespace for:
+ * - Cleaner OS temp directory (single namespace)
+ * - Easier cleanup through the portable cleanAll() helper
+ * - Debugging (all state in one place)
+ * - No collisions with other tools
+ *
+ * Fixes:
+ * - #177: Race condition from shared global state file
+ * - #178: Scattered temp files consolidation
+ *
+ * @module ck-paths
+ */
+
+const path = require('path');
+const os = require('os');
+const fs = require('fs');
+const { resolveProjectRoot } = require('./project-root.cjs');
+
+// Root directory for all ClaudeKit temp files (OS temp — session-scoped)
+const CK_TMP_DIR = path.join(os.tmpdir(), 'ck');
+
+// Shared fallback session ID — MUST match across all hooks that read/write markers
+// Used when session_id is absent from hook payload (e.g., in tests or older clients)
+const SESSION_ID_DEFAULT = 'default';
+
+// Project-scoped runtime data (ephemeral flags, markers — NOT in .claude/ to keep it portable)
+const PROJECT_DIR = resolveProjectRoot({
+    cwd: process.cwd(),
+    scriptPath: __filename,
+    env: process.env,
+}).rootDir;
+const PROJECT_TMP_DIR = path.join(PROJECT_DIR, 'tmp', 'claude-temp');
+
+// Project-scoped runtime file paths (dismiss flags, markers, warnings)
+const INIT_DISMISSED_PATH = path.join(PROJECT_TMP_DIR, '.init-dismissed');
+const AGENT_FILES_DISMISSED_PATH = path.join(PROJECT_TMP_DIR, '.agent-files-dismissed');
+const SCAN_STALE_DISMISSED_PATH = path.join(PROJECT_TMP_DIR, '.scan-stale-dismissed');
+const GRAPH_DISMISSED_PATH = path.join(PROJECT_TMP_DIR, '.graph-dismissed');
+const SCAN_STALE_PATH = path.join(PROJECT_TMP_DIR, '.scan-stale');
+// Local freshness ledger: records "this doc was re-verified on DATE and nothing
+// changed", so a scan that correctly writes nothing does not leave the doc looking
+// stale forever. Untracked by design, and that is a REAL trade-off, not a free win:
+// because a no-op scan no longer restamps the doc, the committed `Last scanned` date
+// freezes at the last content change. Freshness is therefore per-workstation — a fresh
+// clone, CI, or a second developer sees the frozen stamp and will warn once the doc
+// passes the staleness window, until a scan runs there too. The gate is warn-only
+// (init-prompt-gate.cjs), so this costs a dismissible notice, never a blocked prompt.
+const SCAN_VERIFIED_PATH = path.join(PROJECT_TMP_DIR, '.scan-verified');
+
+// Session-specific marker files (per-session, no race conditions)
+const MARKERS_DIR = path.join(CK_TMP_DIR, 'markers');
+
+// Debug logs directory
+const DEBUG_DIR = path.join(CK_TMP_DIR, 'debug');
+
+// External memory swap directory (tool output externalization)
+const SWAP_DIR = path.join(CK_TMP_DIR, 'swap');
+
+// Session state directory (consolidated from /tmp/ck-session-*.json)
+const SESSION_STATE_DIR = path.join(CK_TMP_DIR, 'session');
+
+// Rolling transcript snapshots (last 200 lines before auto-compact)
+const SNAPSHOT_DIR = path.join(CK_TMP_DIR, 'snapshots');
+const SNAPSHOT_MAX_AGE_MINUTES = 120;
+
+/**
+ * Ensure directory exists
+ * @param {string} dirPath - Directory path to create
+ */
+function ensureDir(dirPath) {
+    try {
+        if (!fs.existsSync(dirPath)) {
+            fs.mkdirSync(dirPath, { recursive: true });
+        }
+    } catch (err) {
+        // Silent fail - non-critical, but log for debugging
+        if (process.env.CK_DEBUG) {
+            console.error(`[CK] Failed to create ${dirPath}: ${err.message}`);
+        }
+    }
+}
+
+/**
+ * Get marker file path for a session
+ * @param {string} sessionId - Session ID
+ * @returns {string} Full path to marker file
+ */
+function getMarkerPath(sessionId) {
+    return path.join(MARKERS_DIR, `${sessionId}.json`);
+}
+
+/**
+ * Get debug log path for a session
+ * @param {string} sessionId - Session ID
+ * @returns {string} Full path to debug log
+ */
+function getDebugLogPath(sessionId) {
+    return path.join(DEBUG_DIR, `${sessionId}.log`);
+}
+
+/**
+ * Get swap directory for a session
+ * @param {string} sessionId - Session ID
+ * @returns {string} Full path to session swap directory
+ */
+function getSwapDir(sessionId) {
+    return path.join(SWAP_DIR, sessionId);
+}
+
+/**
+ * Ensure swap directory exists for a session
+ * @param {string} sessionId - Session ID
+ * @returns {string} Full path to session swap directory
+ */
+function ensureSwapDir(sessionId) {
+    const swapPath = getSwapDir(sessionId);
+    ensureDir(swapPath);
+    return swapPath;
+}
+
+/**
+ * Get session state file path
+ * @param {string} sessionId - Session ID
+ * @returns {string} Full path to session state file (/tmp/ck/session/{id}.json)
+ */
+function getSessionStatePath(sessionId) {
+    ensureDir(SESSION_STATE_DIR);
+    return path.join(SESSION_STATE_DIR, `${sessionId}.json`);
+}
+
+/**
+ * Get snapshot file path for a session
+ * @param {string} sessionId - Session ID
+ * @returns {string} Full path to snapshot file
+ */
+function getSnapshotPath(sessionId) {
+    ensureDir(SNAPSHOT_DIR);
+    return path.join(SNAPSHOT_DIR, `${sessionId}.json`);
+}
+
+/**
+ * Ensure the project-scoped tmp/claude-temp/ directory exists.
+ * Call before writing any project-scoped runtime file.
+ */
+function ensureProjectTmpDir() {
+    ensureDir(PROJECT_TMP_DIR);
+}
+
+/**
+ * Initialize ClaudeKit temp directories
+ * Call this at startup to ensure directories exist
+ */
+function initDirs() {
+    ensureDir(CK_TMP_DIR);
+    ensureDir(MARKERS_DIR);
+    ensureDir(DEBUG_DIR);
+    ensureDir(SWAP_DIR);
+    ensureDir(SESSION_STATE_DIR);
+    ensureDir(SNAPSHOT_DIR);
+}
+
+/**
+ * Clean up all ClaudeKit temp files
+ * Useful for testing or manual cleanup
+ */
+function cleanAll() {
+    try {
+        if (fs.existsSync(CK_TMP_DIR)) {
+            fs.rmSync(CK_TMP_DIR, { recursive: true, force: true });
+        }
+    } catch (err) {
+        // Silent fail
+    }
+}
+
+module.exports = {
+    // Directories
+    CK_TMP_DIR,
+    MARKERS_DIR,
+    DEBUG_DIR,
+    SWAP_DIR,
+    SESSION_STATE_DIR,
+    SNAPSHOT_DIR,
+    SNAPSHOT_MAX_AGE_MINUTES,
+    PROJECT_TMP_DIR,
+
+    // Files (project-scoped runtime)
+    INIT_DISMISSED_PATH,
+    AGENT_FILES_DISMISSED_PATH,
+    SCAN_STALE_DISMISSED_PATH,
+    GRAPH_DISMISSED_PATH,
+    SCAN_STALE_PATH,
+    SCAN_VERIFIED_PATH,
+
+    // Helpers
+    ensureDir,
+    ensureProjectTmpDir,
+    getMarkerPath,
+    getDebugLogPath,
+    getSwapDir,
+    ensureSwapDir,
+    getSessionStatePath,
+    getSnapshotPath,
+    initDirs,
+    cleanAll,
+    SESSION_ID_DEFAULT
+};
