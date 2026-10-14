@@ -1,0 +1,100 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const thisDir = path.dirname(fileURLToPath(import.meta.url));
+const verifierPath = path.resolve(thisDir, '..', 'verify-no-project-residue.mjs');
+const { findProjectSymbolViolations, forbiddenTerms, genericSourceRoots, managedBlockRanges, projectSymbolDenylist, projectSymbolAllowlist, projectSymbolScanRoots } =
+    await import(pathToFileURL(verifierPath).href);
+
+// TC-SKILLFIX-010 — a denylisted project symbol in a NON-allowlisted generic skill is flagged.
+test('TC-SKILLFIX-010: flags a denylisted project symbol in a non-allowlisted file', () => {
+    const content = 'Components extend `AppBaseComponent` for lifecycle teardown.';
+    const violations = findProjectSymbolViolations(content, '.claude/skills/some-generic/SKILL.md');
+    assert.equal(violations.length, 1);
+    assert.equal(violations[0].symbol, 'AppBaseComponent');
+    assert.equal(violations[0].line, 1);
+});
+
+// TC-SKILLFIX-011 — the SAME symbol is exempt in an allowlisted file (per-file exemption).
+test('TC-SKILLFIX-011: allowlisted file+symbol is not flagged', () => {
+    const content = '- API services MUST extend `PlatformApiService` (BLOCKED)';
+    const violations = findProjectSymbolViolations(content, '.claude/skills/architecture/references/mode-review.md');
+    assert.equal(violations.length, 0);
+});
+
+// TC-SKILLFIX-012 — case-sensitive + word-boundary → no partial/case false positives.
+test('TC-SKILLFIX-012: case-sensitive, word-boundary — no partial or case false positives', () => {
+    const content = [
+        'lowercase appbasecomponent must not match (case differs)',
+        'AppBaseComponentStore is a different, longer symbol (right boundary fails)',
+        'embeddedPlatformVmStore inside a word (left boundary fails)'
+    ].join('\n');
+    const violations = findProjectSymbolViolations(content, '.claude/skills/some-generic/SKILL.md');
+    assert.equal(violations.length, 0);
+});
+
+// TC-SKILLFIX-013 — the allowlist is per-SYMBOL, not whole-file: project-config is exempt only for
+// IPlatformRootRepository, so a second denylisted symbol in the same file is still flagged.
+test('TC-SKILLFIX-013: allowlist is per-symbol, not whole-file', () => {
+    const content = [
+        'Use `IPlatformRootRepository<TEntity>` not "follow best practices".',
+        'State via `PlatformVmStore`.'
+    ].join('\n');
+    const violations = findProjectSymbolViolations(content, '.claude/skills/project-config/SKILL.md');
+    assert.equal(violations.length, 1);
+    assert.equal(violations[0].symbol, 'PlatformVmStore');
+    assert.equal(violations[0].line, 2);
+});
+
+// TC-SKILLFIX-013b — invariant: every allowlisted symbol is a real denylist member (guards against
+// allowlist typos that would silently exempt nothing / drift out of sync with the denylist).
+test('TC-SKILLFIX-013b: every allowlisted symbol is a member of the denylist', () => {
+    const deny = new Set(projectSymbolDenylist);
+    for (const [file, symbols] of Object.entries(projectSymbolAllowlist)) {
+        for (const symbol of symbols) {
+            assert.ok(deny.has(symbol), `allowlist[${file}] references non-denylisted symbol "${symbol}"`);
+        }
+    }
+});
+
+// Managed-block skipping (parity with the forbidden-term scanner) is opt-in and off by default.
+test('TC-SKILLFIX-013c: default scan does NOT skip managed blocks', () => {
+    const content = '`AppBaseComponent` sits in plain prose.';
+    assert.equal(findProjectSymbolViolations(content, '.claude/skills/some-generic/SKILL.md').length, 1);
+});
+
+// TC-SKILLFIX-013d — the project-symbol scan MUST cover source templates and generated mirrors.
+// Guards against portable outputs passing residue checks while carrying source-project symbols.
+test('TC-SKILLFIX-013d: project-symbol scan covers source templates and generated mirrors', () => {
+    assert.ok(projectSymbolScanRoots.includes('.claude/skills'), 'skills must be a symbol-scan root');
+    assert.ok(projectSymbolScanRoots.includes('.claude/hooks'), 'hooks must be a symbol-scan root');
+    assert.ok(projectSymbolScanRoots.includes('.claude/agents'), 'agent source templates must be a symbol-scan root');
+    assert.ok(projectSymbolScanRoots.includes('.codex'), 'generated Codex output must be a symbol-scan root');
+    assert.ok(projectSymbolScanRoots.includes('.agents'), 'generated agent skill output must be a symbol-scan root');
+});
+
+test('TC-SKILLFIX-013e: forbidden-term scan covers portable hook config', () => {
+    assert.ok(genericSourceRoots.includes('.claude/hooks/config'), 'generic hook config must be scanned for project residue');
+});
+
+test('TC-SKILLFIX-013f: no generated block is exempt from project-term residue checks', () => {
+    assert.deepEqual(
+        managedBlockRanges,
+        [],
+        'generated portable context must never hide project-specific text behind a managed-block exemption'
+    );
+});
+
+// TC-SKILLFIX-013g — every consuming-project NAME must be denied. The Orient entries were added
+// after that project's spec paths and package names reached .claude/scripts/codex/tests: the scan
+// already covered that directory, so what failed was the term list. Terms are split here for the
+// same reason they are split in the verifier -- this test file sits inside the scanned tree and
+// would otherwise flag itself.
+test('TC-SKILLFIX-013g: the forbidden-term list denies every known consuming-project name', () => {
+    const lowered = forbiddenTerms.map(term => term.toLowerCase());
+    for (const name of ['br' + 'avo', 'Orient' + 'Software', 'Orient' + ' One', 'orient' + '-one']) {
+        assert.ok(lowered.includes(name.toLowerCase()), `consuming-project name is not denied: ${name}`);
+    }
+});

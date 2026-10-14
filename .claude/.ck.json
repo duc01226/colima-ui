@@ -1,0 +1,63 @@
+{
+  "assertions": [
+    "Consult the project's configured context and applicable reference docs for architecture and technology conventions; do not assume a stack",
+    "Architecture: Search for existing implementations before creating new code",
+    "Architecture: Place logic in the lowest appropriate layer, following the project's documented architecture",
+    "Architecture: Plan before implementing non-trivial tasks"
+  ],
+  "codeReview": {
+    "enabled": true,
+    "injectOnSkills": ["code-quality-review", "code-review", "review", "review:codebase", "changes-review", "code-reviewer"],
+    "rulesPath": "docs/project-reference/code-review-rules.md"
+  },
+  "locale": {
+    "responseLanguage": null,
+    "thinkingLanguage": null
+  },
+  "paths": {
+    "docs": "docs",
+    "plans": "plans"
+  },
+  "portability": {
+    "enabled": true,
+    "rule": "Reusable skills and protocol text stay project-neutral; project-specific conventions are discovered from docs/project-config.json and docs/project-reference/.",
+    "projectConfigPath": "docs/project-config.json"
+  },
+  "plan": {
+    "dateFormat": "YYMMDD-HHmm",
+    "namingFormat": "{date}-{issue}-{slug}",
+    "reportsDir": "reports",
+    "resolution": {
+      "branchPattern": "(?:feat|fix|chore|refactor|docs)/(?:[^/]+/)?(.+)",
+      "order": ["session", "branch"]
+    },
+    "validation": {
+      "focusAreas": ["assumptions", "risks", "tradeoffs", "architecture"],
+      "maxQuestions": 8,
+      "minQuestions": 3,
+      "mode": "auto"
+    }
+  },
+  "project": {
+    "framework": "auto",
+    "packageManager": "auto",
+    "type": "auto"
+  },
+  "subagent": {
+    "agents": {
+      "backend-developer": {
+        "contextPrefix": "Focus: Backend development. Read backend-patterns-reference.md in the project-reference docs root for this project's architecture and patterns."
+      },
+      "integration-tester": {
+        "contextPrefix": "Focus: Integration tests. Read integration-test-reference.md in the project-reference docs root for this project's test patterns and naming conventions."
+      },
+      "researcher": {
+        "contextPrefix": "Focus: Technology research. Check codebase for existing implementations first."
+      }
+    }
+  },
+  "trust": {
+    "enabled": false,
+    "passphrase": null
+  }
+}
