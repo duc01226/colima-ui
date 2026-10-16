@@ -44,7 +44,7 @@
 
   let feed = $state<ActivityFeed | null>(null);
   let loading = $state(false);
-  let kind = $state<ActivityKind | "">("");
+  let { kind = $bindable<ActivityKind | "">("") } = $props<{ kind?: ActivityKind | "" }>();
 
   const KINDS: ActivityKind[] = ["destructive", "lifecycle", "task", "config"];
 

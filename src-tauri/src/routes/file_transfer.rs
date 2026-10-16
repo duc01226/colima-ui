@@ -9,10 +9,10 @@
 //! in the UI; it is not an authorization mechanism. Confinement of written paths is
 //! enforced inside `commands::file_transfer`, on every path, not at this layer.
 
-use axum::{http::StatusCode, response::Json};
 use crate::api_server::*;
 use crate::commands::file_transfer::{self, TransferStarted};
 use crate::routes::payloads::*;
+use axum::{http::StatusCode, response::Json};
 
 pub async fn api_image_save(
     Json(body): Json<ImageSaveBody>,
@@ -74,7 +74,10 @@ pub async fn api_cancel_transfer(
     StatusCode,
     Json<ApiResponse<crate::transfer_registry::CancelOutcome>>,
 ) {
-    ok(file_transfer::cancel_transfer_job(&body.job_id))
+    match file_transfer::try_cancel_transfer_job(&body.job_id) {
+        Ok(outcome) => ok(outcome),
+        Err(error) => err(error),
+    }
 }
 
 /// Every transfer this process knows about.

@@ -92,6 +92,21 @@ it("blurs the input on the first Escape, and closes a panel on the next", () => 
   expect(uiState.aiPanelOpen).toBe(false);
 });
 
+it("keeps terminal Escape and Ctrl-C with the shell without blurring or closing panels", () => {
+  const wrap = document.createElement("div");
+  wrap.className = "xterm";
+  const input = document.createElement("textarea");
+  wrap.appendChild(input);
+  document.body.appendChild(wrap);
+  input.focus();
+  uiState.aiPanelOpen = true;
+  for (const [key, opts] of [["Escape", {}], ["c", { ctrlKey: true }]] as const) {
+    expect(press(key, opts, input).defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(input);
+    expect(uiState.aiPanelOpen).toBe(true);
+  }
+});
+
 it("closes one panel per Escape, outermost first", () => {
   uiState.aiPanelOpen = true;
   notificationState.panelOpen = true;

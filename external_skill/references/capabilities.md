@@ -1,6 +1,6 @@
 # Danh sách Năng lực (Capabilities) của ColimaUI
 
-Đây là cuốn "từ điển" liệt kê chính xác mọi hành động mà **ColimaUI AI Agent** có thể hiểu và thực thi. 
+Danh mục này mô tả các event theo chủ sở hữu; khả năng hiện tại phụ thuộc host/engine. Kiểm tra catalog được lọc trước khi gọi, vì backend vẫn giữ quyền từ chối. Trên Windows, VM/Kubernetes/runtime-install/model/preset không khả dụng; Docker dùng engine gốc đã chọn (`src/lib/aiEventBus.ts:45`, `src-tauri/src/host_features.rs:16`).
 Khi phân tích yêu cầu của User, hãy tham chiếu danh sách này để biết ColimaUI có khả năng thực hiện hay không. **TUYỆT ĐỐI KHÔNG** bịa ra các hành động nằm ngoài danh sách dưới đây.
 
 ## Colima / Máy ảo (Instances)
@@ -72,9 +72,9 @@ Khi phân tích yêu cầu của User, hãy tham chiếu danh sách này để b
 
 ## Hệ thống & Lima VMs
 - `system-df`: Xem dung lượng đĩa (Docker df).
-- `system-host-specs`, `system-check`: Kiểm tra tài nguyên và công cụ của máy chủ MacOS.
+- `system-host-specs`, `system-check`: Kiểm tra tài nguyên và công cụ của host.
 - `system-prune`: Dọn dẹp rác toàn hệ thống (Containers, Networks, Images, Volumes).
-- `cli-exec`: Thực thi lệnh bash tùy ý qua App CLI gateway.
+- `cli-exec`: argv literal qua sandbox và giới hạn host; cần giữ Safe/Approve/Banned. Kết quả browser mô phỏng không chứng minh đã thực thi lệnh.
 - `lima-list`, `lima-start`, `lima-stop`, `lima-delete`, `lima-create`, `lima-info`, `lima-templates`, `lima-shell`: Toàn quyền thao tác trên Lima VM.
 
 ## AI Models & Cấu hình Ứng dụng

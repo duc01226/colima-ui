@@ -43,6 +43,15 @@ let _resolvedBase = "";
 let _resolving: Promise<string> | null = null;
 
 export async function resolveApiBase(): Promise<string> {
+  if (isTauri()) {
+    const invoke = await getInvoke();
+    if (!invoke) throw new Error("Desktop API discovery is unavailable");
+    const port = await invoke("api_port");
+    if (typeof port !== "number" || !Number.isInteger(port) || port < 11420 || port > 11429) {
+      throw new Error("This application's local API is not ready");
+    }
+    return `http://127.0.0.1:${port}`;
+  }
   if (_resolvedBase) return _resolvedBase;
   // Collapse concurrent callers onto a single probe.
   if (_resolving) return _resolving;

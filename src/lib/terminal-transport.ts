@@ -12,6 +12,7 @@
  * the `kind` tag is what serde matches on.
  */
 export type SessionKind =
+  | { kind: "containerExec"; containerId: string; engine: string; containerName?: string }
   | { kind: "colima"; profile: string }
   | { kind: "lima"; instance: string }
   | { kind: "k8sExec"; namespace: string; pod: string; container: string };
@@ -19,6 +20,8 @@ export type SessionKind =
 /** Human label for a tab. */
 export function sessionLabel(k: SessionKind): string {
   switch (k.kind) {
+    case "containerExec":
+      return `${k.containerName || k.containerId.slice(0, 12)} · ${k.engine}`;
     case "colima":
       return k.profile === "default" ? "colima" : k.profile;
     case "lima":
@@ -40,6 +43,9 @@ export function sessionLabel(k: SessionKind): string {
  * Returns null when the code speaks for itself.
  */
 export function exitHint(kind: SessionKind, code: number): string | null {
+  if (kind.kind === "containerExec" && (code === 127 || code === 126)) {
+    return "This container has no usable shell. Use its logs or choose an image that includes a shell.";
+  }
   if (kind.kind === "k8sExec" && code === 127) {
     return (
       "This image has no shell, so there is nothing to attach to. " +
@@ -70,6 +76,16 @@ async function tauri(): Promise<{ invoke: Invoke; Channel: ChannelCtor }> {
     invoke: core.invoke as Invoke,
     Channel: core.Channel as unknown as ChannelCtor,
   };
+}
+
+/** Capture backend-verified origin; the name is display-only metadata. */
+export async function containerTerminalTarget(containerId: string, containerName: string): Promise<SessionKind> {
+  const { invoke } = await tauri();
+  const kind = await invoke<SessionKind>("terminal_target", { containerId });
+  if (kind.kind !== "containerExec" || kind.containerId !== containerId || !kind.engine) {
+    throw new Error("Invalid container terminal target");
+  }
+  return { ...kind, containerName };
 }
 
 /**

@@ -204,29 +204,17 @@ pub async fn sse_docker_watcher() {
 /// the socket path changes when colima is recreated, so a cached client outlives
 /// the socket it points at. This runs at most once per debounce window.
 async fn fetch_current_docker_state() -> Option<serde_json::Value> {
-    let docker = crate::docker_state::connect_bollard()?;
+    let docker = crate::docker_state::connect_bollard().await?;
     fetch_docker_state(&docker).await
 }
 
 /// Fetch current Docker containers + images and return as JSON.
 async fn fetch_docker_state(docker: &bollard::Docker) -> Option<serde_json::Value> {
-    use bollard::query_parameters::{ListContainersOptions, ListImagesOptions};
-
-    let containers = docker
-        .list_containers(Some(ListContainersOptions {
-            all: true,
-            ..Default::default()
-        }))
-        .await
-        .unwrap_or_default();
-
-    let images = docker
-        .list_images(Some(ListImagesOptions {
-            all: false,
-            ..Default::default()
-        }))
-        .await
-        .unwrap_or_default();
+    #[cfg(windows)]
+    let generation = crate::engine_connection::read_generation().ok()?;
+    let resources = crate::docker_state::fetch_resources(docker).await.ok()?;
+    let containers = resources.containers;
+    let images = resources.images;
 
     // Reuse the single mapper rather than keeping a second copy here. The
     // two had already drifted — this one emitted a lowercase "id" — and a
@@ -257,14 +245,25 @@ async fn fetch_docker_state(docker: &bollard::Docker) -> Option<serde_json::Valu
         }));
     }
 
-    Some(serde_json::json!({
+    #[cfg(windows)]
+    crate::engine_connection::ensure_generation(generation).ok()?;
+    #[allow(unused_mut)]
+    let mut snapshot = serde_json::json!({
         "containers": mapped_containers,
         "images": mapped_images
-    }))
+    });
+    #[cfg(windows)]
+    {
+        snapshot["origin_generation"] = serde_json::json!(generation);
+    }
+    Some(snapshot)
 }
 
 /// Periodically publish instance state to SSE clients
 pub async fn sse_instance_publisher() {
+    if cfg!(windows) {
+        return;
+    }
     let mut last_json = String::new();
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;

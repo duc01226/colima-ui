@@ -32,6 +32,16 @@ graph TD
     KB --> SQLITE["SQLite DB"]
 ```
 
+### Windows Docker context and actual sender
+
+The packaged brief advertises only syntax recognized by the actual frontend parser; its documentation lookup uses Help/reference reading rather than an unimplemented SEARCH token. SAFE `ai-config-status` returns only a known provider identifier and model/key/endpoint presence. Native read failures return fixed unavailable/unknown text; raw active/inactive keys, model/endpoint text and unrelated settings never enter this tool result. The result flows through the event bus into the next outgoing history; selected provider authentication remains a separate transport argument. Settings storage and NORMAL update authority are unchanged (`src-tauri/resources/windows_docker_assistant.md:7`, `src/lib/aiEvents/config.ts:47`, `src/lib/agentCore.ts:101`, `src/lib/agentCore.ts:348`, `src/lib/agentCore-config.test.ts:40`).
+
+On Windows, native `system::get_app_context` returns the embedded Docker assistant brief instead of loading the macOS/VM skill bundle. The frontend `agentCore.runAgent` appends the currently available event catalog before sending model history. `aiEventBus` filters advertisement/category/dispatch through host capabilities; unavailable or unknown events are refused before an approval request. Legacy QUERY_APP_STATE omits VM/Kubernetes/preset acquisition and DIAGNOSE does not acquire VM logs (`src-tauri/src/commands/system.rs:585`, `src-tauri/resources/windows_docker_assistant.md:1`, `src/lib/agentCore.ts:77`, `src/lib/aiEventBus.ts:28`, `src/lib/agentCore.ts:142`, `src/lib/agentCore.ts:166`, `src/lib/agentCore.ts:214`, `src/lib/agentCore.ts:242`). This changes deterministic capability context, not model/provider calls, reasoning-round limits or autonomy. The backend remains authoritative. Windows omits `build-image`, `compose-build` and `compose-pull` consistently from advertisement, category lookup and direct dispatch because their legacy handlers generate commands the sandbox refuses even after approval. Supported Docker/Compose actions and the macOS/Linux catalog are preserved; this does not expand the sandbox whitelist.
+
+Supported Container/Compose query rejection becomes a fixed redacted unavailable/unknown projection when host policy is Windows or unresolved; successful empty reads remain arrays. Verified macOS/Linux retain their existing projection and legacy acquisition/approval behavior. The actual sender fixture covers all four read outcomes across Windows/unknown/macOS/Linux with substituted model calls; it changes no approval or reasoning/provider budget (`src/lib/agentCore.ts:222`, `src/lib/agentCore.test.ts:54`).
+
+Windows resource references are confined to the packaged resource base. Retrieved references, memories and workload output remain untrusted information; they cannot grant host or target authority (`src-tauri/src/commands/system.rs:574`). The broader VM/host examples below apply only where that host feature is supported.
+
 ## Multi-Provider AI Chat (`commands/ai_chat.rs`)
 
 Supports multiple LLM providers through a unified interface:
@@ -104,9 +114,11 @@ sudo, su, eval, exec, rm -rf /, shutdown, reboot,
 mkfs, dd, format, curl | sh, wget | sh, ...
 ```
 
+Windows text commands retain Safe/NeedsApproval/Banned classification but permit only supported Docker argv through the captured engine and bounded child-process owner. Approval cannot grant unavailable VM/Kubernetes/provisioning/host-shell operations or override connection selectors. `POST /api/cli/execute_stream` reuses the safe executor: it carries no approval grant and emits bounded completed stdout/stderr/exit, or a redacted error; it is not an interactive terminal (`src-tauri/src/commands/shell_sandbox.rs:261`, `src-tauri/src/commands/shell_sandbox.rs:289`, `src-tauri/src/routes/kb.rs:98`).
+
 ## Knowledge Bank (`commands/knowledge_bank.rs`)
 
-SQLite-backed memory at `~/.colima-ui/knowledge.db`:
+SQLite-backed memory uses the shared application data root: native LocalAppData/ColimaUI on Windows and the existing `.colima-ui` location on macOS/Linux (`src-tauri/src/path_util.rs:76`).
 
 ### Schema
 
@@ -180,11 +192,17 @@ CREATE TABLE presets (
 
 ### AI Event Bus (`lib/aiEvents/`)
 - Domain-specific tool registrations for each area (Docker, K8s, Colima, Lima, etc.)
-- Allows AI to invoke UI actions (navigate to page, refresh data, etc.)
+- Allows AI to invoke UI actions (navigate to page, refresh data, etc.); advertisement, category lookup and execution share host-feature availability (`src/lib/aiEventBus.ts:47`)
 
 ### AI Tool Parser (`lib/aiToolParser.ts`)
 - Parses XML-style tool calls from LLM responses
 - Extracts tool name, parameters, and result expectations
+
+## Automatic repair and evidence limits
+
+Raw daemon events retain the originating availability generation before display debounce. Self-heal clears counting state across recovery, rejects stale generations and validates the original connection/host capability before an automatic attempt. Kill switch, Suggest default, advisory-only actions and per-rule hourly quota outcomes remain at the existing executor; a capability change does not grant autonomy (`src-tauri/src/docker_state.rs:224`, `src-tauri/src/commands/self_heal.rs:607`, `src-tauri/src/commands/self_heal.rs:679`, `src-tauri/src/commands/self_heal.rs:827`).
+
+Deterministic fixtures inspect the actual outgoing frontend sender and event filter with substituted model/effect seams, plus real router policy-refusal assertions. They are source mappings; current run evidence is required for execution, and no live-model evaluation or native/provider result is established (`src/lib/agentCore.test.ts:28`, `src/lib/aiEventBus.test.ts:15`, `src-tauri/src/api_server.rs:520`). Read `docs/integration-test-reference.md` and the canonical Windows cases before claiming coverage.
 
 ## External Agent Integration
 

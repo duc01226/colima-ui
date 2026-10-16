@@ -579,31 +579,40 @@ pub async fn kb_query(error_text: String) -> Result<KBQueryResult, crate::error:
 /// Uses two fixed, literal SQL statements (no string interpolation of SQL
 /// fragments) so the query text can never be influenced by caller input.
 #[tauri::command]
-pub async fn kb_feedback(solution_id: i64, is_like: bool) -> Result<String, crate::error::ColimaError> {
+pub async fn kb_feedback(
+    solution_id: i64,
+    is_like: bool,
+) -> Result<String, crate::error::ColimaError> {
     async move {
-    let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
-    if is_like {
-        conn.execute(
-            "UPDATE solutions SET likes = likes + 1 WHERE id = ?1",
-            params![solution_id],
-        )
-        .map_err(|e| format!("DB update: {}", e))?;
-        Ok("Solution liked".to_string())
-    } else {
-        conn.execute(
-            "UPDATE solutions SET dislikes = dislikes + 1 WHERE id = ?1",
-            params![solution_id],
-        )
-        .map_err(|e| format!("DB update: {}", e))?;
-        Ok("Solution disliked".to_string())
+        let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
+        if is_like {
+            conn.execute(
+                "UPDATE solutions SET likes = likes + 1 WHERE id = ?1",
+                params![solution_id],
+            )
+            .map_err(|e| format!("DB update: {}", e))?;
+            Ok("Solution liked".to_string())
+        } else {
+            conn.execute(
+                "UPDATE solutions SET dislikes = dislikes + 1 WHERE id = ?1",
+                params![solution_id],
+            )
+            .map_err(|e| format!("DB update: {}", e))?;
+            Ok("Solution disliked".to_string())
+        }
     }
-    }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 /// Save a new learned solution from AI response
 #[tauri::command]
-pub async fn kb_save_solution(     error_pattern: String,     error_category: String,     solution_text: String,     root_cause: String, ) -> Result<i64, crate::error::ColimaError> {
+pub async fn kb_save_solution(
+    error_pattern: String,
+    error_category: String,
+    solution_text: String,
+    root_cause: String,
+) -> Result<i64, crate::error::ColimaError> {
     async move {
     let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
     conn.execute(
@@ -618,32 +627,40 @@ pub async fn kb_save_solution(     error_pattern: String,     error_category: St
 
 /// Agentic Context Engineering: Save a new learned solution directly from AI's [LEARN: ...] tool
 #[tauri::command]
-pub async fn kb_learn(error_pattern: String, solution_text: String) -> Result<i64, crate::error::ColimaError> {
+pub async fn kb_learn(
+    error_pattern: String,
+    solution_text: String,
+) -> Result<i64, crate::error::ColimaError> {
     async move {
-    kb_save_solution(
-        error_pattern,
-        "Agentic Learning".to_string(),
-        solution_text,
-        "Auto-distilled by reasoning loop".to_string(),
-    )
-    .await
+        kb_save_solution(
+            error_pattern,
+            "Agentic Learning".to_string(),
+            solution_text,
+            "Auto-distilled by reasoning loop".to_string(),
+        )
+        .await
     }
     .await
 }
 
 /// Save an anti-pattern (approach that didn't work)
 #[tauri::command]
-pub async fn kb_save_anti_pattern(     error_pattern: String,     bad_suggestion: String,     reason: String, ) -> Result<i64, crate::error::ColimaError> {
+pub async fn kb_save_anti_pattern(
+    error_pattern: String,
+    bad_suggestion: String,
+    reason: String,
+) -> Result<i64, crate::error::ColimaError> {
     async move {
-    let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
-    conn.execute(
-        "INSERT INTO anti_patterns (error_pattern, bad_suggestion, reason) VALUES (?1, ?2, ?3)",
-        params![error_pattern, bad_suggestion, reason],
-    )
-    .map_err(|e| format!("DB insert: {}", e))?;
-    Ok(conn.last_insert_rowid())
+        let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
+        conn.execute(
+            "INSERT INTO anti_patterns (error_pattern, bad_suggestion, reason) VALUES (?1, ?2, ?3)",
+            params![error_pattern, bad_suggestion, reason],
+        )
+        .map_err(|e| format!("DB insert: {}", e))?;
+        Ok(conn.last_insert_rowid())
     }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 fn stable_id(input: &str) -> String {
@@ -659,8 +676,15 @@ fn stable_id(input: &str) -> String {
     hex
 }
 
-pub fn add_agent_memory(conn: &Connection, memory_type: &str, content: &str) -> rusqlite::Result<()> {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+pub fn add_agent_memory(
+    conn: &Connection,
+    memory_type: &str,
+    content: &str,
+) -> rusqlite::Result<()> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let id = stable_id(&format!("mem|{}", nanos));
     conn.execute(
         "INSERT INTO agent_memory (id, type, content) VALUES (?1, ?2, ?3)",
@@ -669,47 +693,62 @@ pub fn add_agent_memory(conn: &Connection, memory_type: &str, content: &str) -> 
     Ok(())
 }
 
-pub fn search_agent_memory(conn: &Connection, query: &str, limit: u32) -> rusqlite::Result<Vec<String>> {
-    let clean_query = query.chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect::<String>();
+pub fn search_agent_memory(
+    conn: &Connection,
+    query: &str,
+    limit: u32,
+) -> rusqlite::Result<Vec<String>> {
+    let clean_query = query
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>();
     let tokens: Vec<&str> = clean_query.split_whitespace().collect();
     if tokens.is_empty() {
         return Ok(Vec::new());
     }
-    
+
     // e.g. "foo bar" -> "foo OR bar"
     let fts_query = tokens.join(" OR ");
-    
+
     let mut stmt = conn.prepare(
         "SELECT content FROM agent_memory_fts 
          WHERE agent_memory_fts MATCH ?1 
          ORDER BY bm25(agent_memory_fts) 
          LIMIT ?2",
     )?;
-    
+
     let results: rusqlite::Result<Vec<String>, _> = stmt
         .query_map(params![fts_query, limit], |row| row.get(0))?
         .collect();
-        
+
     results
 }
 
 #[tauri::command]
-pub async fn add_memory(memory_type: String, content: String) -> Result<String, crate::error::ColimaError> {
+pub async fn add_memory(
+    memory_type: String,
+    content: String,
+) -> Result<String, crate::error::ColimaError> {
     async move {
-    let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
-    add_agent_memory(&conn, &memory_type, &content).map_err(|e| format!("DB insert: {}", e))?;
-    Ok("Memory added".to_string())
+        let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
+        add_agent_memory(&conn, &memory_type, &content).map_err(|e| format!("DB insert: {}", e))?;
+        Ok("Memory added".to_string())
     }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 #[tauri::command]
-pub async fn search_memory(query: String, limit: u32) -> Result<Vec<String>, crate::error::ColimaError> {
+pub async fn search_memory(
+    query: String,
+    limit: u32,
+) -> Result<Vec<String>, crate::error::ColimaError> {
     async move {
-    let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
-    search_agent_memory(&conn, &query, limit).map_err(|e| format!("DB search: {}", e))
+        let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
+        search_agent_memory(&conn, &query, limit).map_err(|e| format!("DB search: {}", e))
     }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -723,82 +762,93 @@ pub struct AgentMemoryItem {
 #[tauri::command]
 pub async fn get_all_memories() -> Result<Vec<AgentMemoryItem>, crate::error::ColimaError> {
     async move {
-    let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
-    let mut stmt = conn
-        .prepare("SELECT id, type, content, created_at FROM agent_memory ORDER BY created_at DESC")
-        .map_err(|e| format!("DB prepare: {}", e))?;
-    
-    let results: Result<Vec<AgentMemoryItem>, _> = stmt
-        .query_map([], |row| {
-            Ok(AgentMemoryItem {
-                id: row.get(0)?,
-                memory_type: row.get(1)?,
-                content: row.get(2)?,
-                created_at: row.get(3)?,
-            })
-        })
-        .map_err(|e| format!("DB query_map: {}", e))?
-        .collect();
+        let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, type, content, created_at FROM agent_memory ORDER BY created_at DESC",
+            )
+            .map_err(|e| format!("DB prepare: {}", e))?;
 
-    results.map_err(|e| format!("DB collect: {}", e))
+        let results: Result<Vec<AgentMemoryItem>, _> = stmt
+            .query_map([], |row| {
+                Ok(AgentMemoryItem {
+                    id: row.get(0)?,
+                    memory_type: row.get(1)?,
+                    content: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })
+            .map_err(|e| format!("DB query_map: {}", e))?
+            .collect();
+
+        results.map_err(|e| format!("DB collect: {}", e))
     }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 #[tauri::command]
-pub async fn update_memory(id: String, content: String) -> Result<String, crate::error::ColimaError> {
+pub async fn update_memory(
+    id: String,
+    content: String,
+) -> Result<String, crate::error::ColimaError> {
     async move {
-    let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
-    conn.execute(
-        "UPDATE agent_memory SET content = ?1 WHERE id = ?2",
-        params![content, id],
-    )
-    .map_err(|e| format!("DB update: {}", e))?;
-    Ok("Memory updated".to_string())
+        let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
+        conn.execute(
+            "UPDATE agent_memory SET content = ?1 WHERE id = ?2",
+            params![content, id],
+        )
+        .map_err(|e| format!("DB update: {}", e))?;
+        Ok("Memory updated".to_string())
     }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 #[tauri::command]
 pub async fn delete_memory(id: String) -> Result<String, crate::error::ColimaError> {
     async move {
-    let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
-    conn.execute(
-        "DELETE FROM agent_memory WHERE id = ?1",
-        params![id],
-    )
-    .map_err(|e| format!("DB delete: {}", e))?;
-    Ok("Memory deleted".to_string())
+        let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
+        conn.execute("DELETE FROM agent_memory WHERE id = ?1", params![id])
+            .map_err(|e| format!("DB delete: {}", e))?;
+        Ok("Memory deleted".to_string())
     }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 #[tauri::command]
-pub async fn save_preset_snapshot(     preset_id: String,     instance_profile: String,     containers_json: String,     is_manual_override: bool, ) -> Result<String, crate::error::ColimaError> {
+pub async fn save_preset_snapshot(
+    preset_id: String,
+    instance_profile: String,
+    containers_json: String,
+    is_manual_override: bool,
+) -> Result<String, crate::error::ColimaError> {
     async move {
-    let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
-    let snapshot_time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+        let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
+        let snapshot_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
 
-    conn.execute(
-        "INSERT INTO preset_container_snapshots 
+        conn.execute(
+            "INSERT INTO preset_container_snapshots 
          (preset_id, instance_profile, snapshot_time, containers_json, is_manual_override) 
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            preset_id,
-            instance_profile,
-            snapshot_time,
-            containers_json,
-            if is_manual_override { 1 } else { 0 }
-        ],
-    )
-    .map_err(|e| format!("DB insert snapshot: {}", e))?;
+            params![
+                preset_id,
+                instance_profile,
+                snapshot_time,
+                containers_json,
+                if is_manual_override { 1 } else { 0 }
+            ],
+        )
+        .map_err(|e| format!("DB insert snapshot: {}", e))?;
 
-    Ok("Snapshot saved".to_string())
+        Ok("Snapshot saved".to_string())
     }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -812,10 +862,13 @@ pub struct PresetSnapshot {
 }
 
 #[tauri::command]
-pub async fn load_preset_snapshot(     preset_id: String,     instance_profile: String, ) -> Result<Option<PresetSnapshot>, crate::error::ColimaError> {
+pub async fn load_preset_snapshot(
+    preset_id: String,
+    instance_profile: String,
+) -> Result<Option<PresetSnapshot>, crate::error::ColimaError> {
     async move {
     let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
-    
+
     // Get the most recent snapshot for this preset and instance profile
     let mut stmt = conn
         .prepare(
@@ -851,7 +904,9 @@ pub async fn load_preset_snapshot(     preset_id: String,     instance_profile: 
 /// Return the latest snapshot for every preset of a given instance profile.
 /// Used by the Containers UI to build a container → preset ownership map.
 #[tauri::command]
-pub async fn list_all_preset_snapshots(     instance_profile: String, ) -> Result<Vec<PresetSnapshot>, crate::error::ColimaError> {
+pub async fn list_all_preset_snapshots(
+    instance_profile: String,
+) -> Result<Vec<PresetSnapshot>, crate::error::ColimaError> {
     async move {
     let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
 
@@ -894,45 +949,49 @@ pub async fn list_all_preset_snapshots(     instance_profile: String, ) -> Resul
 #[tauri::command]
 pub async fn get_setting(key: String) -> Result<Option<String>, crate::error::ColimaError> {
     async move {
-    let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
-    let mut stmt = conn.prepare("SELECT setting_value FROM app_settings WHERE setting_key = ?1")
-        .map_err(|e| format!("DB prepare: {}", e))?;
-    let mut iter = stmt.query_map(params![key], |row| row.get(0))
-        .map_err(|e| format!("DB query_map: {}", e))?;
-    if let Some(Ok(val)) = iter.next() {
-        Ok(Some(val))
-    } else {
-        Ok(None)
+        let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
+        crate::app_settings::read(&conn, &key).map_err(|e| format!("DB read setting: {e}"))
     }
-    }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 #[tauri::command]
 pub async fn set_setting(key: String, value: String) -> Result<String, crate::error::ColimaError> {
-    async move {
-    let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
-    conn.execute(
-        "INSERT INTO app_settings (setting_key, setting_value, updated_at) VALUES (?1, ?2, datetime('now'))
-         ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = datetime('now')",
-        params![key, value],
-    )
-    .map_err(|e| format!("DB execute: {}", e))?;
-    Ok("Setting saved".to_string())
+    if key == crate::engine_connection::CONTEXT_SETTING {
+        crate::engine_connection::validate_context_name(&value)?;
+        #[cfg(windows)]
+        {
+            let selected = value.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::engine_connection::validate_selection(&selected)
+            })
+            .await
+            .map_err(|_| "Connection check could not finish".to_string())??;
+        }
     }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    async move {
+        let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
+        crate::app_settings::write(&conn, &key, &value)
+            .map_err(|e| format!("DB write setting: {e}"))?;
+        Ok("Setting saved".to_string())
+    }
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 #[tauri::command]
 pub async fn get_all_settings() -> Result<std::collections::HashMap<String, String>, String> {
     let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
-    let mut stmt = conn.prepare("SELECT setting_key, setting_value FROM app_settings")
+    let mut stmt = conn
+        .prepare("SELECT setting_key, setting_value FROM app_settings")
         .map_err(|e| format!("DB prepare: {}", e))?;
-    let iter = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })
-    .map_err(|e| format!("DB query_map: {}", e))?;
-    
+    let iter = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("DB query_map: {}", e))?;
+
     let mut map = std::collections::HashMap::new();
     for row in iter.filter_map(|r| r.ok()) {
         map.insert(row.0, row.1);
@@ -943,30 +1002,35 @@ pub async fn get_all_settings() -> Result<std::collections::HashMap<String, Stri
 #[tauri::command]
 pub async fn get_preset(id: String) -> Result<Option<String>, crate::error::ColimaError> {
     async move {
-    let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
-    let mut stmt = conn.prepare("SELECT config_json FROM user_presets WHERE id = ?1")
-        .map_err(|e| format!("DB prepare: {}", e))?;
-    let mut iter = stmt.query_map(params![id], |row| row.get(0))
-        .map_err(|e| format!("DB query_map: {}", e))?;
-    if let Some(Ok(val)) = iter.next() {
-        Ok(Some(val))
-    } else {
-        Ok(None)
+        let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
+        let mut stmt = conn
+            .prepare("SELECT config_json FROM user_presets WHERE id = ?1")
+            .map_err(|e| format!("DB prepare: {}", e))?;
+        let mut iter = stmt
+            .query_map(params![id], |row| row.get(0))
+            .map_err(|e| format!("DB query_map: {}", e))?;
+        if let Some(Ok(val)) = iter.next() {
+            Ok(Some(val))
+        } else {
+            Ok(None)
+        }
     }
-    }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 #[tauri::command]
 pub async fn get_all_presets() -> Result<std::collections::HashMap<String, String>, String> {
     let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
-    let mut stmt = conn.prepare("SELECT id, config_json FROM user_presets")
+    let mut stmt = conn
+        .prepare("SELECT id, config_json FROM user_presets")
         .map_err(|e| format!("DB prepare: {}", e))?;
-    let iter = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })
-    .map_err(|e| format!("DB query_map: {}", e))?;
-    
+    let iter = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("DB query_map: {}", e))?;
+
     let mut map = std::collections::HashMap::new();
     for row in iter.filter_map(|r| r.ok()) {
         map.insert(row.0, row.1);
@@ -975,7 +1039,10 @@ pub async fn get_all_presets() -> Result<std::collections::HashMap<String, Strin
 }
 
 #[tauri::command]
-pub async fn save_preset(id: String, config_json: String) -> Result<String, crate::error::ColimaError> {
+pub async fn save_preset(
+    id: String,
+    config_json: String,
+) -> Result<String, crate::error::ColimaError> {
     async move {
     let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
     conn.execute(
@@ -992,10 +1059,11 @@ pub async fn save_preset(id: String, config_json: String) -> Result<String, crat
 #[tauri::command]
 pub async fn delete_preset(id: String) -> Result<String, crate::error::ColimaError> {
     async move {
-    let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
-    conn.execute("DELETE FROM user_presets WHERE id = ?1", params![id])
-        .map_err(|e| format!("DB delete: {}", e))?;
-    Ok("Preset deleted".to_string())
+        let conn = db().lock().map_err(|e| format!("DB lock: {}", e))?;
+        conn.execute("DELETE FROM user_presets WHERE id = ?1", params![id])
+            .map_err(|e| format!("DB delete: {}", e))?;
+        Ok("Preset deleted".to_string())
     }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }

@@ -76,8 +76,16 @@ export function subscribeMetrics(handlers: MetricsHandlers): () => void {
   let retryDelay = INITIAL_RETRY_MS;
 
   async function connect() {
-    const token = await getApiToken();
-    const base = await resolveApiBase();
+    let token: string;
+    let base: string;
+    try { token = await getApiToken(); base = await resolveApiBase(); }
+    catch {
+      if (cancelled) return;
+      handlers.onError?.();
+      retryTimeout = setTimeout(connect, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, MAX_RETRY_MS);
+      return;
+    }
     if (cancelled) return;
     // The topic is in the query string because the backend counts subscribers
     // per topic — without it the collector never starts.

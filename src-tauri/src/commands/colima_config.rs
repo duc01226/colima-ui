@@ -11,7 +11,7 @@
 //! release adds would be deleted from the user's file. Writing that atomically
 //! only guarantees the deletion is not interrupted.
 //!
-//! So the whole read/modify/write path here works on `serde_yml::Value`. We
+//! So the whole read/modify/write path here works on `serde_norway::Value`. We
 //! mutate the specific keys the UI owns and hand the rest of the document back
 //! untouched. `round_trip_preserves_unmanaged_fields` in the tests below is the
 //! executable form of that promise.
@@ -24,7 +24,7 @@
 //! path is unreachable without a successfully parsed document.
 
 use serde::{Deserialize, Serialize};
-use serde_yml::Value;
+use serde_norway::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -147,7 +147,11 @@ pub struct ApplyResult {
 /// [`write_atomic`], where the path does exist and the check is meaningful.
 fn config_path(home: &Path, profile: &str) -> Result<PathBuf, ColimaError> {
     crate::validation::ensure_valid_profile(profile).map_err(ColimaError::validation)?;
-    let profile = if profile.is_empty() { "default" } else { profile };
+    let profile = if profile.is_empty() {
+        "default"
+    } else {
+        profile
+    };
     Ok(home.join(profile).join("colima.yaml"))
 }
 
@@ -185,14 +189,14 @@ fn mtime_of(path: &Path) -> Result<i64, ColimaError> {
 
 /// Parse a profile's colima.yaml into an untyped document.
 ///
-/// Hard-fails on a malformed file. serde_yml reports the line and column in its
+/// Hard-fails on a malformed file. serde_norway reports the line and column in its
 /// `Display`, so the message the user sees points at the broken line.
 pub fn read_raw(home: &Path, profile: &str) -> Result<(Value, i64), ColimaError> {
     let path = existing_config_path(home, profile)?;
     let text = std::fs::read_to_string(&path)
         .map_err(|e| ColimaError::internal(format!("Cannot read {}: {}", path.display(), e)))?;
 
-    let value: Value = serde_yml::from_str(&text).map_err(|e| {
+    let value: Value = serde_norway::from_str(&text).map_err(|e| {
         ColimaError::validation(format!("{} is not valid YAML: {}", path.display(), e))
     })?;
 
@@ -241,12 +245,10 @@ fn set_path(doc: &mut Value, dotted: &str, new_value: Value) {
     if !cur.is_mapping() {
         *cur = Value::Mapping(Default::default());
     }
-    cur.as_mapping_mut()
-        .expect("just ensured mapping")
-        .insert(
-            Value::String(segments[segments.len() - 1].to_string()),
-            new_value,
-        );
+    cur.as_mapping_mut().expect("just ensured mapping").insert(
+        Value::String(segments[segments.len() - 1].to_string()),
+        new_value,
+    );
 }
 
 /// One-line rendering for the diff view. Sequences and mappings are shown as
@@ -260,7 +262,7 @@ fn render(value: Option<&Value>) -> Option<String> {
         Value::String(s) => s.clone(),
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => n.to_string(),
-        other => serde_yml::to_string(other)
+        other => serde_norway::to_string(other)
             .unwrap_or_default()
             .trim()
             .replace('\n', ", "),
@@ -405,10 +407,7 @@ pub fn validate(
                 "Disk cannot shrink from {} GiB to {} GiB. Colima can only grow a disk.",
                 old_disk, new_disk
             ),
-            &[
-                ("from", old_disk.to_string()),
-                ("to", new_disk.to_string()),
-            ],
+            &[("from", old_disk.to_string()), ("to", new_disk.to_string())],
         )),
         (Some(new_disk), _) if new_disk > host.disk_free_gib as u64 => issues.push(issue(
             "disk",
@@ -512,7 +511,7 @@ pub fn write_atomic(home: &Path, profile: &str, doc: &Value) -> Result<String, C
         .parent()
         .ok_or_else(|| ColimaError::internal("config path has no parent"))?;
 
-    let serialized = serde_yml::to_string(doc)
+    let serialized = serde_norway::to_string(doc)
         .map_err(|e| ColimaError::internal(format!("Cannot serialize config: {}", e)))?;
 
     let stamp = std::time::SystemTime::now()
@@ -563,6 +562,7 @@ fn home_dir() -> PathBuf {
 /// Load the managed fields of a profile's config.
 #[tauri::command]
 pub async fn get_colima_config(profile: String) -> Result<ConfigSnapshot, ColimaError> {
+    crate::host_features::HostFeature::ManagedVms.require()?;
     let (doc, mtime) = read_raw(&home_dir(), &profile)?;
     Ok(ConfigSnapshot {
         profile,
@@ -577,6 +577,7 @@ pub async fn preview_colima_config(
     profile: String,
     changes: ConfigChanges,
 ) -> Result<ApplyResult, ColimaError> {
+    crate::host_features::HostFeature::ManagedVms.require()?;
     // Nothing is recorded here on purpose: previewing changes nothing about the
     // machine, and a log full of "looked at the config" would bury the entries
     // that describe what was actually done to it.
@@ -585,7 +586,7 @@ pub async fn preview_colima_config(
     let mut new = old.clone();
     apply_changes(&mut new, &changes);
 
-    let host = crate::commands::system::detect_host_specs();
+    let host = crate::commands::system::detect_host_specs()?;
     Ok(ApplyResult {
         changes: diff(&old, &new),
         issues: validate(&new, &old, &host),
@@ -606,53 +607,54 @@ pub async fn apply_colima_config(
     changes: ConfigChanges,
     expected_mtime: i64,
 ) -> Result<ApplyResult, ColimaError> {
+    crate::host_features::HostFeature::ManagedVms.require()?;
     // Wrapped whole rather than recorded at the end: this returns early in
     // three places, and two of them — a stale-mtime refusal and an apply with
     // nothing to apply — are exactly the cases somebody comes back asking about.
     let logged_profile = profile.clone();
     let result = (|| -> Result<ApplyResult, ColimaError> {
-    let home = home_dir();
-    let (old, mtime) = read_raw(&home, &profile)?;
-    if mtime != expected_mtime {
-        return Err(ColimaError::validation(
-            "The config file changed on disk since it was loaded. Reload and try again."
-                .to_string(),
-        ));
-    }
+        let home = home_dir();
+        let (old, mtime) = read_raw(&home, &profile)?;
+        if mtime != expected_mtime {
+            return Err(ColimaError::validation(
+                "The config file changed on disk since it was loaded. Reload and try again."
+                    .to_string(),
+            ));
+        }
 
-    let mut new = old.clone();
-    apply_changes(&mut new, &changes);
+        let mut new = old.clone();
+        apply_changes(&mut new, &changes);
 
-    let host = crate::commands::system::detect_host_specs();
-    let issues = validate(&new, &old, &host);
-    if issues.iter().any(|i| i.severity == IssueSeverity::Error) {
-        return Ok(ApplyResult {
-            changes: diff(&old, &new),
-            issues,
-            backup_path: None,
-            mtime,
-        });
-    }
+        let host = crate::commands::system::detect_host_specs()?;
+        let issues = validate(&new, &old, &host);
+        if issues.iter().any(|i| i.severity == IssueSeverity::Error) {
+            return Ok(ApplyResult {
+                changes: diff(&old, &new),
+                issues,
+                backup_path: None,
+                mtime,
+            });
+        }
 
-    let changes_list = diff(&old, &new);
-    if changes_list.is_empty() {
-        return Ok(ApplyResult {
+        let changes_list = diff(&old, &new);
+        if changes_list.is_empty() {
+            return Ok(ApplyResult {
+                changes: changes_list,
+                issues,
+                backup_path: None,
+                mtime,
+            });
+        }
+
+        let backup = write_atomic(&home, &profile, &new)?;
+        let new_mtime = mtime_of(&existing_config_path(&home, &profile)?)?;
+
+        Ok(ApplyResult {
             changes: changes_list,
             issues,
-            backup_path: None,
-            mtime,
-        });
-    }
-
-    let backup = write_atomic(&home, &profile, &new)?;
-    let new_mtime = mtime_of(&existing_config_path(&home, &profile)?)?;
-
-    Ok(ApplyResult {
-        changes: changes_list,
-        issues,
-        backup_path: Some(backup),
-        mtime: new_mtime,
-    })
+            backup_path: Some(backup),
+            mtime: new_mtime,
+        })
     })();
 
     // What the record says depends on what actually reached the disk. Two of
@@ -731,7 +733,7 @@ customFutureKey: preserved
     }
 
     fn parse(text: &str) -> Value {
-        serde_yml::from_str(text).expect("fixture must parse")
+        serde_norway::from_str(text).expect("fixture must parse")
     }
 
     fn temp_home(config: &str) -> tempdir::Home {
@@ -841,6 +843,41 @@ customFutureKey: preserved
     }
 
     #[test]
+    fn unrelated_edit_preserves_tagged_fields_and_literal_environment_values() {
+        let text = FULL_CONFIG
+            .replace(
+                "  MY_VAR: keep-me",
+                "  MY_VAR: keep-me\n  FLAG: 'on'\n  NUMBER: '0123'\n  LABEL: '資料 空間'",
+            )
+            .replace(
+                "customFutureKey: preserved",
+                "customFutureKey: !Workload {name: future, enabled: true}",
+            );
+        let home = temp_home(&text);
+        let (mut document, _) = read_raw(home.path(), "default").unwrap();
+        let original = document.get("customFutureKey").unwrap().clone();
+        apply_changes(
+            &mut document,
+            &ConfigChanges {
+                cpu: Some(6),
+                ..Default::default()
+            },
+        );
+        write_atomic(home.path(), "default", &document).unwrap();
+        let output = home.config_text("default");
+        assert!(
+            output.contains("!Workload"),
+            "an unrelated edit must preserve unknown tagged data"
+        );
+        let written = parse(&output);
+        assert_eq!(written.get("customFutureKey"), Some(&original));
+        assert_eq!(written["cpu"].as_u64(), Some(6));
+        for (name, value) in [("FLAG", "on"), ("NUMBER", "0123"), ("LABEL", "資料 空間")] {
+            assert_eq!(written["env"][name].as_str(), Some(value));
+        }
+    }
+
+    #[test]
     fn nested_edits_preserve_siblings() {
         let mut doc = parse(FULL_CONFIG);
         apply_changes(
@@ -856,7 +893,10 @@ customFutureKey: preserved
             get_path(&doc, "network.dns"),
             Some(&Value::Sequence(vec![Value::String("1.1.1.1".into())]))
         );
-        assert_eq!(get_path(&doc, "kubernetes.enabled"), Some(&Value::Bool(true)));
+        assert_eq!(
+            get_path(&doc, "kubernetes.enabled"),
+            Some(&Value::Bool(true))
+        );
 
         // Siblings under the same mappings survive.
         let original = parse(FULL_CONFIG);
@@ -890,8 +930,15 @@ customFutureKey: preserved
         let result = read_raw(home.path(), "default");
         assert!(result.is_err(), "malformed YAML must not parse");
 
-        assert_eq!(home.config_text("default"), before, "file must be untouched");
-        assert!(home.backups("default").is_empty(), "no backup on failed read");
+        assert_eq!(
+            home.config_text("default"),
+            before,
+            "file must be untouched"
+        );
+        assert!(
+            home.backups("default").is_empty(),
+            "no backup on failed read"
+        );
     }
 
     #[test]
@@ -1075,7 +1122,10 @@ customFutureKey: preserved
         let backup = write_atomic(home.path(), "default", &doc).expect("write");
         let backed_up = std::fs::read_to_string(&backup).expect("backup readable");
 
-        assert_eq!(backed_up, FULL_CONFIG, "backup must hold the pre-write file");
+        assert_eq!(
+            backed_up, FULL_CONFIG,
+            "backup must hold the pre-write file"
+        );
         assert_eq!(home.backups("default").len(), 1);
         // And no temp file survived.
         assert!(!home

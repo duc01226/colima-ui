@@ -34,6 +34,8 @@ export default tseslint.config(
       '.claude/**',
       'external_skill/**',
       'coverage/**',
+      'tmp/**',
+      'temp/**',
     ],
   },
 

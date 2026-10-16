@@ -17,13 +17,12 @@
   interface Props {
     evaluation: Evaluation;
     pack: RulePack | null;
+    showPassed?: boolean;
     /** Opens the offline Knowledge Base article that explains these rules. */
     onOpenGuide?: () => void;
   }
 
-  let { evaluation, pack, onOpenGuide }: Props = $props();
-
-  let showPassed = $state(false);
+  let { evaluation, pack, onOpenGuide, showPassed = $bindable(false) }: Props = $props();
 
   function ruleOf(result: RuleResult): Rule | undefined {
     return pack?.rules.find((r) => r.id === result.ruleId);

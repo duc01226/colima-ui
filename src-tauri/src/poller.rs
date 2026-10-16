@@ -29,6 +29,9 @@ pub struct InstancesUpdate {
 
 /// Start background polling for instance status
 pub fn start_instance_poller(app: &AppHandle) {
+    if cfg!(windows) {
+        return;
+    }
     let handle = app.clone();
 
     // Get or create state
@@ -42,7 +45,8 @@ pub fn start_instance_poller(app: &AppHandle) {
             tick.tick().await;
 
             // Use the fast filesystem reader (shared with Tauri command and API server)
-            let result = tokio::task::spawn_blocking(crate::instance_reader::list_instances_fast).await;
+            let result =
+                tokio::task::spawn_blocking(crate::instance_reader::list_instances_fast).await;
 
             if let Ok(parsed) = result {
                 // Update shared state

@@ -2,7 +2,8 @@ import { colimaApi, dockerApi, composeApi, k8sApi, sysMethods, knowledgeBankApi,
 import type { ChatMessage } from "./api";
 import { chatStream } from "./llmProviders";
 import { newId } from "./ids";
-import { getCategory, executeEvent } from "./aiEventBus";
+import { getCategory, executeEvent, listEvents } from "./aiEventBus";
+import { capabilitiesState, isDockerOnlyHost, supportsHostVms, supportsKubernetes } from "../store/capabilities.svelte";
 import { BUILT_IN_PRESETS } from "./presetStateManager";
 import { parseAiTools } from "./aiToolParser";
 import { findProvider } from "./aiProviderConfig";
@@ -73,8 +74,12 @@ export async function runAgent(
     // Memory retrieval failure is non-fatal — the agent can still run without it.
   }
 
+  const context = isDockerOnlyHost() ? `${appContext}
+
+Available events for this host (name, category, description):
+${JSON.stringify(listEvents())}` : appContext;
   const fullHistory: ChatMessage[] = [
-    ...(appContext ? [{ role: "system" as const, content: appContext }] : []),
+    ...(context ? [{ role: "system" as const, content: context }] : []),
     ...(kbContext ? [{ role: "system" as const, content: `[Knowledge Bank]\n${kbContext}` }] : []),
     ...(memoryContext ? [{ role: "system" as const, content: `[USER_MEMORY]\n- ${memoryContext}` }] : []),
     ...chatHistory.filter(m => m.role !== "system").slice(-10).map(m => ({ role: m.role as "user" | "assistant", content: m.content })),
@@ -134,6 +139,9 @@ export async function runAgent(
         const pld = payload ? payload.trim() : "";
         const category = getCategory(evt);
         
+        if (category === null) { toolContext += `
+(Event unavailable: ${evt}. Choose an available tool.)
+`; continue; }
         if (category !== "SAFE") {
           toolContext += `\n(Query denied: ${evt} is not SAFE. Use [EVENT_APPROVE] instead.)\n`;
           continue;
@@ -154,6 +162,9 @@ export async function runAgent(
         const evt = eventName.trim();
         const pld = payload ? payload.trim() : "";
         const category = getCategory(evt);
+        if (category === null) { toolContext += `
+(Event unavailable: ${evt}. No action was requested.)
+`; continue; }
         let parsedPayload = {};
         try {
           parsedPayload = pld ? JSON.parse(pld) : {};
@@ -200,31 +211,36 @@ export async function runAgent(
           const hostSpecsPromise = sysMethods.hostSpecs();
           const [instances, containers, composeProjects, k8sContext, hostSpecs] = 
             await Promise.allSettled([
-              colimaApi.listInstances(),
+              supportsHostVms() ? colimaApi.listInstances() : Promise.resolve("unavailable on this host"),
               dockerApi.listContainers(),
               composeApi.list(),
-              k8sApi.currentContext(),
+              supportsKubernetes() ? k8sApi.currentContext() : Promise.resolve("unavailable on this host"),
               hostSpecsPromise,
             ]);
+          // Keep failed supported reads distinct from a healthy empty engine.
+          // Rejection details may contain private paths or credentials.
+          const failedRead = (source: string) => capabilitiesState.platform === null || isDockerOnlyHost()
+            ? { status: "unavailable", reason: `${source} query failed; current state is unknown.` }
+            : [];
           
           toolContext += `\n### Live System State
 Host: ${JSON.stringify(hostSpecs.status === "fulfilled" ? hostSpecs.value : "unknown")}
 Instances: ${JSON.stringify(instances.status === "fulfilled" ? instances.value : [])}
-Containers (summary): ${JSON.stringify(
-(containers.status === "fulfilled" ? containers.value : [])
-  .map((c) => ({id: c.Id?.slice(0,12), name: c.Names, image: c.Image, status: c.Status}))
-)}
-Compose Projects: ${JSON.stringify(composeProjects.status === "fulfilled" ? composeProjects.value : [])}
+Containers (summary): ${JSON.stringify(containers.status === "fulfilled"
+  ? containers.value.map((c) => ({id: c.Id?.slice(0,12), name: c.Names, image: c.Image, status: c.Status}))
+  : failedRead("Container"))}
+Compose Projects: ${JSON.stringify(composeProjects.status === "fulfilled" ? composeProjects.value : failedRead("Compose"))}
 K8s Context: ${k8sContext.status === "fulfilled" ? k8sContext.value : "none"}
-Custom Presets: ${JSON.stringify(customPresets)}
-Built-in Presets: ${JSON.stringify(BUILT_IN_PRESETS)}
+Custom Presets: ${JSON.stringify(supportsHostVms() ? customPresets : "unavailable on this host")}
+Built-in Presets: ${JSON.stringify(supportsHostVms() ? BUILT_IN_PRESETS : "unavailable on this host")}
 `;
         } catch (e) {
           toolContext += `\n(Query app state failed: ${e})\n`;
         }
       }
 
-      if (hasDiagnose) {
+      if (hasDiagnose && !supportsHostVms()) toolContext += "\nVM diagnostics are unavailable on this host. Use supported Docker queries.\n";
+      if (hasDiagnose && supportsHostVms()) {
         callbacks.onStatus("🔬 Collecting diagnostics...");
         callbacks.onMessage({ id: newId(), role: "system", content: "🔬 Collecting diagnostics (logs, processes, locks)..." });
         try {

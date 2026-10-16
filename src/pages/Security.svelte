@@ -36,6 +36,7 @@
     type Level,
     type RulePack,
     type SecurityAudit,
+    type Severity,
   } from "../lib/api/security";
   import { dockerApi, type DockerImage } from "../lib/api";
   import { blockingCapability, capability, capabilityNotice } from "../store/capabilities.svelte";
@@ -51,6 +52,7 @@
   import FindingsTable from "../components/security/FindingsTable.svelte";
   import RuleChecklist from "../components/security/RuleChecklist.svelte";
   import AlternativesPanel from "../components/security/AlternativesPanel.svelte";
+  import { recoveryDraft } from "../lib/recoveryDrafts.svelte";
 
   type Tab = "overview" | "images" | "history";
 
@@ -59,6 +61,15 @@
   let selected = $state<string | null>(null);
   let level = $state<Level>("l1");
   let pack = $state<RulePack | null>(null);
+  let minSeverity = $state<Severity>("low");
+  let showPassed = $state(false);
+  let recoveryImage: { id: string; ref: string; minSeverity: Severity; showPassed: boolean } | null = null;
+  recoveryDraft("security-intent", () => {
+    const image = images.find((i) => refName(i) === selected);
+    return { tab, level, image: image ? { id: image.Id, ref: refName(image), minSeverity, showPassed } : recoveryImage };
+  }, (draft) => {
+    tab = draft.tab; level = draft.level; recoveryImage = draft.image;
+  });
 
   /** Audits by image reference, so switching back to one is instant. */
   let audits = $state<Record<string, SecurityAudit>>({});
@@ -140,6 +151,14 @@
   async function loadImages() {
     try {
       images = (await dockerApi.listImages()).filter((i) => i.Repository && i.Repository !== "<none>");
+      if (recoveryImage) {
+        // A tag may now name different content. Retain preferences only for
+        // the same freshly listed image; audits and scan authority start empty.
+        if (images.some((i) => i.Id === recoveryImage?.id && refName(i) === recoveryImage.ref)) {
+          selected = recoveryImage.ref; minSeverity = recoveryImage.minSeverity; showPassed = recoveryImage.showPassed;
+        }
+        recoveryImage = null;
+      }
       // An image that is gone cannot keep the detail pane: the score on screen
       // would describe something that no longer exists on this machine.
       if (selected && !images.some((i) => refName(i) === selected)) selected = null;
@@ -420,13 +439,14 @@
               <RuleChecklist
                 evaluation={currentAudit.evaluation}
                 {pack}
+                bind:showPassed
                 onOpenGuide={() => openHelpArticle("image-hardening")}
               />
             </section>
 
             <section class="card block">
               <h2>{t("security.findings_heading", { default: "Known vulnerabilities" })}</h2>
-              <FindingsTable findings={currentAudit.scan.findings} />
+              <FindingsTable findings={currentAudit.scan.findings} bind:minSeverity />
             </section>
 
             <section class="card block">

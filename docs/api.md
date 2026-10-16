@@ -1,6 +1,6 @@
 # HTTP API Reference
 
-ColimaUI exposes a REST API on `http://127.0.0.1:11420` for browser-mode access and external integrations.
+ColimaUI binds its HTTP API to an available loopback port in 11420–11429. Browser UI is the Vite development surface; the packaged router does not serve frontend assets. Public health reports liveness, not engine readiness or credential identity (`src-tauri/src/api_server.rs:366`, `src-tauri/src/api_server.rs:391`).
 
 ## Authentication
 
@@ -18,7 +18,13 @@ Authorization: Bearer <token>
 
 `/api/health` is the only one. There is no endpoint that hands out the token:
 the desktop webview gets it over IPC (`auth::api_token`), and a browser gets it
-from the app in a URL fragment. See [Architecture → HTTP Authentication](architecture.md#http-authentication).
+from the debug browser handoff in a URL fragment, consumed once and removed from the address bar. SSE query-token use is explicitly allowlisted; ordinary requests use Bearer auth.
+
+The external `cui` client reads the current nonsecret instance marker through a read-only settings connection, then validates its owner-private `api/<instance>.json` for port/credential. A new instance supersedes the marker before bind and publishes only after successful bind; missing/invalid/unavailable references never trigger a health-port fallback. App exit closes only its own reference after owned work settles. Private-file publication failure preserves existing in-app access (`src-tauri/src/api_reference.rs:72`, `src-tauri/src/api_reference.rs:93`, `src-tauri/src/api_reference.rs:108`, `src-tauri/src/api_reference.rs:125`, `src-tauri/src/api_server.rs:417`, `src-tauri/src/lib.rs:404`). Read [Architecture → HTTP Authentication](architecture.md#http-authentication) when changing these handoffs; never put credential contents in docs or evidence.
+
+Native SSE consumers resolve this instance’s bound port through `api_port` IPC and fail closed while it is unbound; browser development keeps the existing health discovery. No new HTTP port/token endpoint is exposed (`src-tauri/src/api_server.rs:34`, `src/lib/api/client.ts:45`).
+
+Authenticated Windows requests to unsupported VM/Kubernetes/model-serving/runtime-install families return 501 before dispatch; missing credentials still fail authentication first. Installed tools do not broaden host support. Capability metadata reports `unsupported` separately from missing/stopped/unknown, while Docker access and public health retain their contracts (`src-tauri/src/host_features.rs:74`, `src-tauri/src/api_server.rs:366`, `src-tauri/src/commands/system_capabilities.rs:40`).
 
 ## SSE Events
 
@@ -45,6 +51,14 @@ Event types: `docker-state`, `instances`, `docker-event`
 | `GET` | `/api/system/df` | Docker disk usage |
 | `GET` | `/api/settings` | Get all settings |
 | `POST` | `/api/settings` | Set a setting (`{key, value}`) |
+
+---
+
+### Native connection preferences
+
+The desktop-only `connectionApi` uses `get_engine_connection`, `check_engine_connection`, `save_engine_connection` and `restart_for_engine`; these are IPC commands, not HTTP connection routes. Reads separate active status, saved pending choice, context choices and discovery errors. Candidate checking does not make it active; saving validates the choice and changes only next launch. The generic `docker.context` settings writer applies the same validation (`src/lib/api/system.ts:197`, `src-tauri/src/commands/engine_connection.rs:16`, `src-tauri/src/commands/knowledge_bank.rs:961`).
+
+Explicit restart first admits shutdown under the transfer registry lock. With `cancelTransfers=false`, active work refuses restart without closing admission; finish or explicitly cancel it and retry. After admission, terminal closure and transfer/stream/child settlement must succeed before `request_restart`. Native restart outcome remains unqualified (`src-tauri/src/commands/engine_connection.rs:72`, `src-tauri/src/transfer_registry.rs:184`).
 
 ---
 
@@ -150,7 +164,10 @@ Logs are capped at 5000 lines and 2 MB *before* redaction — `redact` costs abo
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| `GET` | `/api/metrics/status` | Read existing collector/engine state without activating monitoring |
 | `POST` | `/api/metrics/interval` | Sampling period in ms (`{ms}`); clamped to 1000–60000, returns what was applied |
+
+`GET /api/metrics/status` is an authenticated, read-only observer of existing collector/engine state. It does not initialize the engine, subscribe, start a tick or change the interval. It requires the normal Authorization header and adds no query-token exception (`src-tauri/src/api_server.rs:170`, `src-tauri/src/commands/metrics_collector.rs:94`, `src-tauri/src/auth.rs:49`).
 
 Samples are not fetched — they arrive on the SSE stream. Subscribe with
 `GET /api/events?topics=metrics.sample`; each event carries
@@ -230,9 +247,7 @@ Results are cached by **image digest**, never by tag: rebuilding `app:latest`
 and scanning again must not return the previous image's findings. Pass
 `refresh: true` to bypass it.
 
-SBOM export writes through a scratch file and renames on success, and refuses an
-existing destination unless `overwrite` is set — a half-written SBOM that looks
-complete is worse than none.
+File-output transfers and SBOM acquire the same process-local destination claim before child/scanner acquisition. A per-job gate orders accepted cancellation, publication and the first terminal outcome; filesystem I/O runs without holding the registry map lock. UI/HTTP cancellation arriving during publication is refused as finishing, rather than reported accepted. Successful publication settles Success before a later cancellation can change it. Exclusive scratch and caller-owned replace/no-replace permission preserve an existing destination when cancellation wins (`src-tauri/src/transfer_registry.rs:128`, `src-tauri/src/transfer_registry.rs:259`, `src-tauri/src/transfer_registry.rs:445`, `src-tauri/src/transfer_registry.rs:223`, `src-tauri/src/streaming_cmd.rs:441`, `src-tauri/src/commands/file_transfer.rs:40`, `src-tauri/src/commands/security_scan.rs:615`).
 
 Nothing is pulled. An image that is not present locally is an error saying so,
 because pulling spends bandwidth the user did not agree to spend. Scanning reads
@@ -272,21 +287,18 @@ of truth — call it on connect and after every reconnect.
 Each entry is
 `{jobId, kind, status, bytes, totalEstimate, startedAt, finishedAt, targetLabel, error}`,
 where `status` is `starting | running | success | failed | cancelled` and `kind` is
-`save | load | cp-in | cp-out`. Finished transfers stay listed for about 60 seconds,
+`save | load | cp-in | cp-out | sbom`. Finished transfers stay listed for about 60 seconds,
 which is what lets a client that missed the terminal event still learn the outcome;
-after that, absence means "finished and already reported". `status: "success"` is
-recorded only after the destination has been published, so it implies the file is
-there. `targetLabel` is an image reference or a path inside a container — never a
+after that, absence no longer establishes the outcome. File-output `status: "success"` follows destination publication; load/copy-in jobs instead require successful runtime completion. `targetLabel` is an image reference or a path inside a container — never a
 host path, so this payload needs no redaction. `error` is redacted at the source.
 
-`POST /api/transfers/cancel` returns `cancelled | alreadyFinished | unknownJob`
-rather than a boolean: only `cancelled` is followed by a terminal event, so the
-other two must be settled by the caller. Nothing is persisted — every transfer is
-killed when the app exits.
+`POST /api/transfers/cancel` returns `cancelled | alreadyFinished | unknownJob` for admitted/settled/absent jobs. If publication currently owns the job gate, cancellation returns an error asking the caller to wait; it must not be treated as accepted. A `cancelled` acknowledgement records intent before kill, and late worker acquisition rechecks settlement and disarms stale pending cancellation (`src-tauri/src/transfer_registry.rs:445`, `src-tauri/src/commands/file_transfer.rs:877`, `src-tauri/src/commands/file_transfer.rs:885`). Nothing is persisted. Quit waits for consumer/stream/child settlement; cleanup timeout prevents exit.
 
 A transfer is refused at start if another unfinished transfer is already writing to
 the same destination. The existence check alone cannot see this, because the first
 job's output is not at that path until it completes.
+
+Transfer outcomes are monotonic: cancelled/terminal jobs cannot become Running again, and the first terminal settlement is retained. Shutdown admission and registration share a lock, preventing new transfers after admitted cleanup (`src-tauri/src/transfer_registry.rs:194`, `src-tauri/src/transfer_registry.rs:216`, `src-tauri/src/transfer_registry.rs:184`).
 
 ### Archive contract
 
@@ -301,9 +313,7 @@ for a directory source — progress then measured a directory entry rather than 
 and cancelling could not remove it. Callers that expected a bare file must extract:
 `tar -xf <file>`.
 
-Output is written to a `<fileName>.part` sibling and renamed onto `fileName` only
-once the command succeeds, so a cancelled or failed transfer leaves any file already
-at that path untouched.
+Output uses an exclusively created `<fileName>.<job-id>.part` sibling and publishes only after command success. Replace permission stays with the caller through commit; without overwrite, a destination appearing during streaming is refused rather than replaced. Cancellation/failure cleans owned scratch and preserves the prior destination (`src-tauri/src/streaming_cmd.rs:400`, `src-tauri/src/streaming_cmd.rs:441`, `src-tauri/src/streaming_cmd.rs:476`).
 
 `destDir` and `fileName` are separate fields because the write is confined to the
 folder the caller named: checking a joined path against its own parent would pass
@@ -336,13 +346,15 @@ Takes no `instance` parameter: nothing in the app targets a second engine.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/compose` | List compose projects |
-| `POST` | `/api/compose/up` | Compose up (`{projectDir, detach}`) |
+| `POST` | `/api/compose/up` | Compose up (`{projectDir, detach}`); client file or directory |
 | `POST` | `/api/compose/down` | Compose down (`{projectName}`) |
 | `POST` | `/api/compose/restart` | Compose restart (`{projectName}`) |
 | `GET` | `/api/compose/logs` | Compose logs (`?projectName=...&lines=100`) |
 | `GET` | `/api/compose/ps` | Compose ps (`?projectName=...`) |
 
 ---
+
+The existing `projectDir` field means a client-side file (`-f`) or directory (`--project-directory`), not a daemon mount path. Windows named-project actions resolve the listed client `ConfigFiles` and refuse missing/malformed metadata; POSIX project actions retain launch-directory behavior. List/log failures remain errors (`src-tauri/src/commands/compose.rs:18`, `src-tauri/src/commands/compose.rs:157`, `src-tauri/src/commands/compose.rs:211`, `src-tauri/src/commands/compose.rs:238`).
 
 ## Docker System
 
@@ -464,6 +476,7 @@ Takes no `instance` parameter: nothing in the app targets a second engine.
 |--------|----------|-------------|
 | `POST` | `/api/sandbox/execute` | Execute safe command |
 | `POST` | `/api/sandbox/execute-approved` | Execute user-approved command |
+| `POST` | `/api/cli/execute_stream` | Safe-only command; bounded completed output over SSE |
 
 ---
 
@@ -475,21 +488,19 @@ Takes no `instance` parameter: nothing in the app targets a second engine.
 
 ---
 
+The command SSE route does not carry interactive approval. It invokes the same safe classifier/executor and sends `stdout`, `stderr`, then `exit` after completion, or `error` on refusal/failure. Windows uses captured Docker argv/environment; unsupported commands and target overrides stay denied even through the separately approved endpoint (`src-tauri/src/routes/kb.rs:98`, `src-tauri/src/commands/shell_sandbox.rs:261`, `src-tauri/src/commands/shell_sandbox.rs:289`).
+
 ## Terminal Sessions
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/terminal/create` | Create PTY terminal session |
-| `POST` | `/api/terminal/write` | Write to terminal |
-| `GET` | `/api/terminal/read` | Read from terminal |
-| `POST` | `/api/terminal/close` | Close terminal session |
-| `POST` | `/api/terminal/resize` | Resize terminal |
+Terminal sessions are native IPC-only; the HTTP router registers no terminal create/write/read/resize/close route. The frontend uses `terminal_target` preflight, then the existing create/write/resize/poll-exit/close lifecycle with output pushed through an IPC Channel (`src-tauri/src/api_server.rs:351`, `src/lib/terminal-transport.ts:82`, `src/lib/terminal-transport.ts:96`, `src-tauri/src/commands/terminal.rs:22`, `src-tauri/src/lib.rs:353`).
+
+`ContainerExec` carries a stable container ID and original engine; creation revalidates running/nonpaused state and origin. Windows uses ConPTY and permits Docker-container sessions only; no host shell or automatic shell/engine installation is a fallback. Close/exit and origin-loss input fences stay with SessionManager. Browser clients can use ordinary permitted resource/one-command exec routes, but cannot open an interactive terminal (`src-tauri/src/terminal_session.rs:285`, `src-tauri/src/terminal_session.rs:486`, `src-tauri/src/terminal_session.rs:570`, `src-tauri/src/terminal_session.rs:643`, `src-tauri/src/windows_pty.rs:156`). Native Windows qualification remains pending.
 
 ---
 
 ## Response Format
 
-All endpoints return a consistent JSON response:
+Ordinary JSON handlers use the response envelope below; authentication failures and SSE/streaming contracts are separate. Terminal IPC has its own results and pushed output.
 
 ```json
 {

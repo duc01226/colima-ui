@@ -5,6 +5,8 @@
   import { t, getLanguage } from "../lib/i18n.svelte";
   import { loadCapabilities, capability } from "../store/capabilities.svelte";
   import Icon from "./Icon.svelte";
+  import EngineConnectionSettings from "./settings/EngineConnectionSettings.svelte";
+  import { uiState } from "../store.svelte";
 
   let { systemInfo, onComplete, onSkip } = $props<{
     systemInfo: SystemInfo | null;
@@ -53,6 +55,8 @@
 
   let step = $state(0);
   let platform = $state<PlatformInfo | null>(null);
+  let platformError = $state(false);
+  let setupDialog: HTMLDialogElement;
   let installMethod = $state<InstallMethod>("brew");
   let deps = $state<DepState[]>([
     { name: "homebrew", label: "Homebrew", desc: "Package manager for macOS", icon: "Homebrew", status: "checking", version: "" },
@@ -73,10 +77,18 @@
   ]);
 
   onMount(() => {
-    sysMethods.getPlatform().then(p => {
+    setupDialog.showModal();
+    void detectPlatform();
+    return () => setupDialog.close();
+  });
+
+  async function detectPlatform() {
+    platformError = false;
+    try {
+      const p = await sysMethods.getPlatform();
       platform = p;
-      if (p.os === "windows" && p.wsl_available) {
-        installMethod = "wsl-brew";
+      if (p.os === "windows") {
+        installMethod = "manual";
       } else if (p.os === "linux") {
         const hasBrew = p.package_managers.find(pm => pm.name === "brew")?.available;
         const hasApt = p.package_managers.find(pm => pm.name === "apt")?.available;
@@ -86,10 +98,8 @@
       } else {
         installMethod = "brew";
       }
-    }).catch(() => {
-      platform = { os: "macos", arch: "aarch64", wsl: false, wsl_available: false, package_managers: [] };
-    });
-  });
+    } catch { platformError = true; }
+  }
 
   async function checkDeps() {
     let updated = [...deps];
@@ -170,6 +180,7 @@
     void installMethod;
     void systemInfo;
 
+    if (!platform || platform.os === "windows") return;
     untrack(() => {
       checkDeps();
       checkOptionalTools();
@@ -278,8 +289,22 @@
   let availableMethods = $derived(getAvailableMethods());
 </script>
 
-<div class="wizard-overlay">
+<dialog bind:this={setupDialog} class="wizard-native" aria-label={t("getting_started.title")} oncancel={(event) => { event.preventDefault(); onSkip(); }}>
   <div class="wizard-card">
+    {#if !platform}
+      <h2>{t("connection.checking_system")}</h2>
+      {#if platformError}<p role="alert">{t("connection.platform_failed")}</p><button class="btn btn-primary" onclick={detectPlatform}>{t("connection.retry")}</button>{/if}
+      <button class="btn btn-ghost" onclick={onSkip}>{t("connection.keep_working")}</button>
+    {:else if platform.os === "windows"}
+      <h2>{t("connection.title")}</h2>
+      <div class="form-group"><label for="setup-language">{t("settings.language")}</label>
+        <select id="setup-language" class="input select" value={getLanguage()} onchange={(event) => setAppSetting("app.language", event.currentTarget.value)}>
+          <option value="en">English</option><option value="vi">Tiếng Việt</option><option value="zh">中文</option><option value="ja">日本語</option>
+        </select>
+      </div>
+      <EngineConnectionSettings id="setup-engine" onConnected={() => { uiState.currentPage = "containers"; onComplete(); }} />
+      <button class="btn btn-ghost" onclick={onSkip}>{t("connection.keep_working")}</button>
+    {:else}
     <div class="wizard-progress">
       {#each STEPS as _, i (i)}
         <div class="wizard-progress-dot {i === step ? 'active' : i < step ? 'done' : ''}"></div>
@@ -352,15 +377,6 @@
               {/if}
             </button>
           {/each}
-        </div>
-      {/if}
-
-      {#if platform?.os === "windows" && !platform.wsl_available}
-        <div style="padding: 12px; background: rgba(248, 81, 73, 0.1); border-radius: var(--radius-md); border: 1px solid rgba(248, 81, 73, 0.3); margin-bottom: 16px; font-size: var(--text-xs); color: var(--accent-red);">
-          <Icon name="Warning" size={14} style="vertical-align: middle; margin-right: 4px;" /> WSL is required to run Colima on Windows. Install it with:
-          <code style="display: block; margin-top: 4px; padding: 4px 8px; background: var(--bg-content); border-radius: 4px;">
-            wsl --install -d Ubuntu
-          </code>
         </div>
       {/if}
 
@@ -466,22 +482,12 @@
       </div>
 
       {#if installMethod === "manual"}
-        {#if platform?.os === "windows"}
-          <div style="padding: 12px; background: var(--bg-content); border-radius: var(--radius-md); font-size: var(--text-xs); color: var(--text-secondary); margin-bottom: 16px; font-family: var(--font-mono); line-height: 1.8;">
-            <div style="color: var(--accent-blue); font-weight: 600; margin-bottom: 4px;">Windows + WSL Setup:</div>
-            1. Install WSL: <code>wsl --install -d Ubuntu</code><br/>
-            2. Open Ubuntu terminal<br/>
-            3. Install Homebrew: <code>/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"</code><br/>
-            4. Install deps: <code>brew install colima docker lima</code>
-          </div>
-        {:else}
           <div style="padding: 12px; background: var(--bg-content); border-radius: var(--radius-md); font-size: var(--text-xs); color: var(--text-secondary); margin-bottom: 16px; font-family: var(--font-mono); line-height: 1.8;">
             <div style="color: var(--accent-blue); font-weight: 600; margin-bottom: 4px;">Manual Installation:</div>
             • Colima: <code>curl -LO https://github.com/abiosoft/colima/releases/latest</code><br/>
             • Docker: <code>https://docs.docker.com/engine/install/</code><br/>
             • Lima: <code>https://lima-vm.io/docs/installation/</code>
           </div>
-        {/if}
       {/if}
 
       <div class="wizard-actions">
@@ -507,7 +513,6 @@
             <span class="wizard-option-desc">
               {#if platform?.os === "macos"}Uses macOS LaunchAgent to start Colima automatically
               {:else if platform?.os === "linux"}{platform?.wsl ? "Starts Colima when WSL boots" : "Uses systemd service to start Colima automatically"}
-              {:else if platform?.os === "windows"}Uses Task Scheduler + WSL to start Colima automatically
               {:else}Colima will start automatically when your system restarts
               {/if}
             </span>
@@ -576,5 +581,13 @@
         </button>
       </div>
     {/if}
+    {/if}
   </div>
-</div>
+</dialog>
+
+<style>
+  .wizard-native { border: 0; padding: 0; background: transparent; color: var(--text-primary); max-width: calc(100% - 24px); max-height: calc(100% - 24px); overflow: auto; }
+  .wizard-native::backdrop { background: var(--bg-overlay); }
+  .wizard-native .wizard-card { width: min(560px, 100%); box-sizing: border-box; }
+  .wizard-native .btn { white-space: normal; }
+</style>

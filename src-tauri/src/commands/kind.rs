@@ -27,6 +27,7 @@ fn ensure_valid_cluster_name(name: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn kind_list() -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     run_blocking(|| run_cmd("kind", &["get", "clusters"]))
         .await
         .map_err(ColimaError::from)
@@ -34,6 +35,7 @@ pub async fn kind_list() -> Result<String, ColimaError> {
 
 #[tauri::command]
 pub async fn kind_create(name: String, image: String) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     async move {
         ensure_valid_cluster_name(&name)?;
         // The node image is a container reference, not a k8s name, so it is
@@ -54,6 +56,7 @@ pub async fn kind_create(name: String, image: String) -> Result<String, ColimaEr
 
 #[tauri::command]
 pub async fn kind_delete(name: String) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     async move {
         ensure_valid_cluster_name(&name)?;
         run_blocking(move || run_cmd("kind", &["delete", "cluster", "--name", &name])).await

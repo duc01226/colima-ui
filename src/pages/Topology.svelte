@@ -5,7 +5,7 @@
    * Deliberately distinct from the Kubernetes graph on the Kubernetes page —
    * that one draws cluster resources, this one draws the Docker engine.
    */
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { topologyApi, type TopologyGraph, type TopologyNodeKind } from "../lib/api";
   import { globalToast } from "../lib/globalToast";
   import { consumeFocus } from "../lib/topology-link";
@@ -13,6 +13,10 @@
   import * as Icons from "../components/Icons.svelte";
   import GraphCanvas from "../components/topology/GraphCanvas.svelte";
   import NodeDetail from "../components/topology/NodeDetail.svelte";
+  import { recoveryDraft } from "../lib/recoveryDrafts.svelte";
+
+  let mounted = true;
+  onDestroy(() => { mounted = false; });
 
   // Canonical kind order, shared with the graph's symbol order and the detail
   // panel's related list: container first, its attachments next, and the
@@ -41,6 +45,11 @@
   let searchTerm = $state("");
   let enabledKinds = $state<Set<TopologyNodeKind>>(new Set(KINDS));
   let selectedId = $state<string | null>(null);
+  let recoverySelection: string | null = null;
+  recoveryDraft("topology-intent", () => ({ searchTerm, kinds: [...enabledKinds], selectedId: selectedId ?? recoverySelection }), (draft) => {
+    searchTerm = draft.searchTerm; enabledKinds = new Set(draft.kinds);
+    recoverySelection = draft.selectedId;
+  });
   // No handle on the canvas component: it owns its own viewport controls now
   // (zoom, fit and reset live in the floating cluster on the canvas itself).
 
@@ -48,6 +57,10 @@
     loading = true;
     try {
       graph = await topologyApi.getTopology();
+      if (recoverySelection) {
+        selectedId = graph.nodes.some((n) => n.id === recoverySelection) ? recoverySelection : null;
+        recoverySelection = null;
+      }
       // A subsystem that failed to list would otherwise read as "this container
       // attaches to nothing", which is a wrong answer rather than a missing one.
       for (const w of graph.warnings) {
@@ -63,6 +76,7 @@
 
   onMount(async () => {
     await refresh();
+    if (!mounted) return;
     // Arriving from another page's "View in topology". A node that no longer
     // exists is ignored rather than leaving a selection pointing at nothing.
     const focus = consumeFocus("topology");

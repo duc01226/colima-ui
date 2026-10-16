@@ -1,8 +1,10 @@
 <script lang="ts">
-   
+  import { onDestroy } from "svelte";
   import { composeApi, k8sApi, limaApi, kindApi, systemApi, type SystemInfo } from "../lib/api";
   import { dashboardState, dockerState, resourceState } from "../store.svelte";
   import { t } from "../lib/i18n.svelte";
+  import { capabilitiesState, isDockerOnlyHost, supportsHostVms, supportsKubernetes } from "../store/capabilities.svelte";
+  import { engineConnectionState } from "../lib/engineConnection.svelte";
 
   let { systemInfo, loading, onNavigate } = $props<{
     systemInfo: SystemInfo | null;
@@ -11,6 +13,17 @@
   }>();
 
   const STALE_MS = 30_000;
+  let mounted = true;
+  let fetched = false;
+  let composeOutcome = $state<"loading" | "ready" | "failed">("loading");
+  onDestroy(() => { mounted = false; });
+
+  function mayPublish(generation: number | null) {
+    if (!mounted || !capabilitiesState.platform) return false;
+    if (!isDockerOnlyHost()) return true;
+    const active = engineConnectionState.snapshot?.active;
+    return !!active?.ready && generation !== null && generation === active.generation && generation === dockerState.originGeneration;
+  }
 
   let runningCount = $derived(dashboardState.colimaInstances.filter(i => i.status === "Running").length);
   let stoppedCount = $derived(dashboardState.colimaInstances.filter(i => i.status !== "Running").length);
@@ -79,25 +92,33 @@
   }
 
   async function fetchEngineResources() {
+    const generation = dockerState.originGeneration;
     try {
-      dashboardState.engineResources = await systemApi.engineResources();
+      const resources = await systemApi.engineResources();
+      if (mayPublish(generation)) dashboardState.engineResources = resources;
     } catch {
-      dashboardState.engineResources = null;
+      if (mayPublish(generation)) dashboardState.engineResources = null;
     }
   }
 
   async function fetchDockerCounts() {
+    const generation = dockerState.originGeneration;
+    if (isDockerOnlyHost() && mayPublish(generation)) composeOutcome = "loading";
     try {
       const compose = await composeApi.list();
-      dashboardState.composeProjectsCount = compose ? compose.length : 0;
+      if (mayPublish(generation)) {
+        dashboardState.composeProjectsCount = compose ? compose.length : 0;
+        composeOutcome = "ready";
+      }
     } catch {
-      // A transient backend hiccup should not break the whole dashboard.
+      if (mayPublish(generation)) composeOutcome = "failed";
     }
   }
 
   async function fetchK8sStatus() {
     try {
       const [checkResult, kindRaw] = await Promise.allSettled([k8sApi.check(), kindApi.list()]);
+      if (!mounted || !supportsKubernetes()) return;
       const connected = checkResult.status === "fulfilled";
       let pods = 0, namespaces = 0;
       if (connected) {
@@ -114,27 +135,31 @@
       const kindClusters = kindRaw.status === "fulfilled"
         ? kindRaw.value.trim().split("\n").filter(Boolean).filter(c => c !== "No kind clusters found.").length
         : 0;
-      dashboardState.k8sStatus = { connected, pods, namespaces, kindClusters };
+      if (mounted && supportsKubernetes()) dashboardState.k8sStatus = { connected, pods, namespaces, kindClusters };
     } catch {
-      dashboardState.k8sStatus = { connected: false, pods: 0, namespaces: 0, kindClusters: 0 };
+      if (mounted && supportsKubernetes()) dashboardState.k8sStatus = { connected: false, pods: 0, namespaces: 0, kindClusters: 0 };
     }
   }
 
   async function fetchLinuxVMs() {
     try {
-      dashboardState.linuxVMs = await limaApi.list();
+      const vms = await limaApi.list();
+      if (mounted && supportsHostVms()) dashboardState.linuxVMs = vms;
     } catch {
-      dashboardState.linuxVMs = [];
+      if (mounted && supportsHostVms()) dashboardState.linuxVMs = [];
     }
   }
 
   $effect(() => {
-    if (!loading) {
+    if (!loading && capabilitiesState.platform) {
       const now = Date.now();
-      if (now - dashboardState.lastFetch > STALE_MS) {
+      // A recovered Windows view must fetch its generation even inside the
+      // ordinary cache interval; never reuse the previous mount's results.
+      if ((isDockerOnlyHost() && !fetched) || now - dashboardState.lastFetch > STALE_MS) {
+        fetched = true;
         fetchDockerCounts();
-        fetchK8sStatus();
-        fetchLinuxVMs();
+        if (supportsKubernetes()) fetchK8sStatus();
+        if (supportsHostVms()) fetchLinuxVMs();
         fetchEngineResources();
         dashboardState.lastFetch = now;
       }
@@ -165,6 +190,7 @@
       </div>
     {/each}
   {:else}
+    {#if supportsHostVms()}
     <!-- SECTION 1: VM Instances -->
     <div class="dash-section">
       <div class="dash-section-header">
@@ -233,6 +259,8 @@
       </div>
     </div>
 
+    {/if}
+
     <!-- SECTION 1b: Engine resources (CPU / RAM / Disk) -->
     <div class="dash-section">
       <div class="dash-section-header">
@@ -247,12 +275,13 @@
             <span class="badge-dot"></span>
             {resources.source} · live
           </span>
-        {:else}
+        {:else if supportsHostVms()}
           <span class="metric-sub" style="margin-left: 8px;">
             {t('dashboard.resources_vm_fallback', { default: 'VM allocation (engine unreachable)' })}
           </span>
         {/if}
       </div>
+      {#if resources.live || supportsHostVms()}
       <div class="dash-grid-3">
         <div class="metric-card metric-card-orange">
           <div class="metric-header">
@@ -296,6 +325,9 @@
           </div>
         </div>
       </div>
+      {:else}
+        <p class="metric-sub" role="status">{t("connection.resource_failed")}</p>
+      {/if}
     </div>
 
     <!-- SECTION 2: Docker Engine -->
@@ -385,13 +417,16 @@
             </div>
           </div>
           <div class="metric-body">
-            <span class="metric-value">{dockerCounts.composeProjects}</span>
-            <span class="metric-sub">Active projects</span>
+            <span class="metric-value">{isDockerOnlyHost() && composeOutcome !== "ready" ? "—" : dockerCounts.composeProjects}</span>
+            <span class="metric-sub" aria-live="polite">{isDockerOnlyHost() && composeOutcome !== "ready"
+              ? composeOutcome === "failed" ? t("dashboard.compose_failed") : t("common.loading")
+              : t("dashboard.active_projects")}</span>
           </div>
         </button>
       </div>
     </div>
 
+    {#if supportsKubernetes() || supportsHostVms()}
     <!-- SECTION 3: Kubernetes & Infrastructure -->
     <div class="dash-section">
       <div class="dash-section-header">
@@ -403,6 +438,7 @@
         <span class="dash-section-title">Infrastructure</span>
       </div>
       <div class="dash-grid-3">
+        {#if supportsKubernetes()}
         <button onclick={() => onNavigate("kubernetes")} class="metric-card {dashboardState.k8sStatus.connected ? 'metric-card-green' : 'metric-card-red'}">
           <div class="metric-header">
             <span class="metric-title">Kubernetes</span>
@@ -417,7 +453,9 @@
             <span class="metric-sub">{dashboardState.k8sStatus.connected ? `${dashboardState.k8sStatus.namespaces} namespaces` : "Disconnected"}</span>
           </div>
         </button>
+        {/if}
 
+        {#if supportsKubernetes() && supportsHostVms()}
         <button onclick={() => onNavigate("instances")} class="metric-card metric-card-purple">
           <div class="metric-header">
             <span class="metric-title">Kind Clusters</span>
@@ -434,7 +472,9 @@
             <span class="metric-sub">Local clusters</span>
           </div>
         </button>
+        {/if}
 
+        {#if supportsHostVms()}
         <button onclick={() => onNavigate("linux-vms")} class="metric-card metric-card-orange">
           <div class="metric-header">
             <span class="metric-title">Linux VMs</span>
@@ -451,14 +491,18 @@
             <span class="metric-sub">{dashboardState.linuxVMs.filter(v => v.status === "Running").length} running</span>
           </div>
         </button>
+        {/if}
       </div>
     </div>
+
+    {/if}
 
     <!-- System Status -->
     {#if systemInfo}
       <div class="card" style="margin-bottom: 24px;">
         <h3 style="font-size: var(--text-lg); font-weight: 600; margin-bottom: 16px;">System Status</h3>
         <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: center;">
+          {#if supportsHostVms()}
           <div style="display: flex; align-items: center; gap: 10px;">
             <span class="badge {systemInfo.colima_installed ? 'badge-running' : 'badge-stopped'}">
               <span class="badge-dot" style="animation: none;"></span>
@@ -466,6 +510,7 @@
             </span>
             <span style="font-size: var(--text-sm); color: var(--text-secondary);">Colima{systemInfo.colima_version ? ` v${systemInfo.colima_version.split('\n')[0].replace(/.*version\s*/i, "")}` : ''}</span>
           </div>
+          {/if}
           <div style="display: flex; align-items: center; gap: 10px;">
             <span class="badge {systemInfo.docker_installed ? 'badge-running' : 'badge-stopped'}">
               <span class="badge-dot" style="animation: none;"></span>
@@ -473,6 +518,7 @@
             </span>
             <span style="font-size: var(--text-sm); color: var(--text-secondary);">Docker</span>
           </div>
+          {#if supportsHostVms()}
           <div style="display: flex; align-items: center; gap: 10px;">
             <span class="badge {systemInfo.lima_installed ? 'badge-running' : 'badge-stopped'}">
               <span class="badge-dot" style="animation: none;"></span>
@@ -480,10 +526,12 @@
             </span>
             <span style="font-size: var(--text-sm); color: var(--text-secondary);">Lima</span>
           </div>
+          {/if}
         </div>
       </div>
     {/if}
 
+    {#if supportsHostVms()}
     <!-- Quick Instance List -->
     {#if dashboardState.colimaInstances.length > 0}
       <div class="card">
@@ -528,6 +576,7 @@
         <div class="empty-state-text">Create your first Colima instance to get started.</div>
         <button class="btn btn-primary" onclick={() => onNavigate("instances")}>Create Instance</button>
       </div>
+    {/if}
     {/if}
   {/if}
 </div>

@@ -139,11 +139,18 @@ struct TrivyDbInfo {
 /// The scan output itself carries neither, and both belong in every result: they
 /// are what makes a finding list reproducible and a later score explainable.
 fn scanner_metadata() -> (String, Option<String>) {
+    #[cfg(not(windows))]
     let mut cmd = std::process::Command::new(crate::path_util::resolve_binary("trivy"));
+    #[cfg(windows)]
+    let mut cmd = match crate::path_util::resolve_executable("trivy") {
+        Some(path) => std::process::Command::new(path),
+        None => return ("unknown".to_string(), None),
+    };
     cmd.args(["version", "--format", "json"]);
     crate::path_util::apply_path_to_cmd(&mut cmd);
 
-    let Ok(out) = cmd.output() else {
+    let Ok(out) = crate::child_process::capture(cmd, std::time::Duration::from_secs(5), 1_048_576)
+    else {
         return ("unknown".to_string(), None);
     };
     let parsed: Option<TrivyVersion> = serde_json::from_slice(&out.stdout).ok();
@@ -255,7 +262,10 @@ pub fn parse_trivy_report(json: &str) -> Result<Vec<Finding>, String> {
                 package: v.pkg_name.unwrap_or_else(|| "unknown".to_string()),
                 installed_version: v.installed_version.unwrap_or_default(),
                 fixed_version: v.fixed_version.filter(|s| !s.is_empty()),
-                severity: v.severity.as_deref().map_or(Severity::Unknown, Severity::parse),
+                severity: v
+                    .severity
+                    .as_deref()
+                    .map_or(Severity::Unknown, Severity::parse),
                 source: v.data_source.and_then(|d| d.id),
                 cvss: pick_cvss(v.cvss.as_ref()),
                 published: v.published,
@@ -328,9 +338,9 @@ fn require_image_ref(image_ref: &str) -> Result<(), String> {
     }
     // The charset `validation::is_valid_container_id` accepts, plus `@` for a
     // digest reference. Spaces and shell metacharacters are absent from both.
-    let body_ok = trimmed.chars().all(|c| {
-        c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '@')
-    });
+    let body_ok = trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '@'));
     if !body_ok || trimmed.len() > 256 {
         return Err(format!("Invalid image reference: {:?}", image_ref));
     }
@@ -370,10 +380,9 @@ fn now_ms() -> u64 {
 /// attempted: it costs bandwidth the user has not agreed to spend, and a missing
 /// image is something they can fix in one click elsewhere in the app.
 fn image_digest(image_ref: &str) -> Result<String, String> {
-    let mut cmd = crate::commands::runtime::get_runtime_cmd();
+    let mut cmd = crate::commands::runtime::get_runtime_cmd()?;
     cmd.args(["image", "inspect", "--format", "{{.Id}}", "--", image_ref]);
-    let out = cmd
-        .output()
+    let out = crate::child_process::capture(cmd, Duration::from_secs(10), 1024 * 1024)
         .map_err(|e| crate::redact::redact_err("Cannot inspect image", e))?;
     if !out.status.success() {
         return Err(format!(
@@ -383,7 +392,10 @@ fn image_digest(image_ref: &str) -> Result<String, String> {
     }
     let digest = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if digest.is_empty() {
-        return Err(format!("Could not determine the image id for {}", image_ref));
+        return Err(format!(
+            "Could not determine the image id for {}",
+            image_ref
+        ));
     }
     Ok(digest)
 }
@@ -399,13 +411,30 @@ fn image_digest(image_ref: &str) -> Result<String, String> {
 ///
 /// This is the same class of defect that ruled Grype out during the phase 1
 /// bakeoff; Trivy avoids it by default configuration, not by construction.
-const LOCAL_IMAGE_SOURCES: &str = "docker,containerd,podman";
+const LOCAL_IMAGE_SOURCES: &str = if cfg!(windows) {
+    "docker"
+} else {
+    "docker,containerd,podman"
+};
 
-fn trivy_cmd(args: &[&str]) -> std::process::Command {
+fn trivy_cmd(args: &[&str]) -> Result<std::process::Command, String> {
+    #[cfg(not(windows))]
     let mut cmd = std::process::Command::new(crate::path_util::resolve_binary("trivy"));
+    #[cfg(windows)]
+    let mut cmd = std::process::Command::new(
+        crate::path_util::resolve_executable("trivy")
+            .ok_or("Trivy is not installed; install it separately and recheck")?,
+    );
     cmd.args(args);
     crate::path_util::apply_path_to_cmd(&mut cmd);
-    cmd
+    #[cfg(windows)]
+    {
+        let connection = crate::engine_connection::active()?;
+        // Revalidate after a potentially long database update, before scanning.
+        connection.command()?;
+        connection.target().apply_environment(&mut cmd);
+    }
+    Ok(cmd)
 }
 
 /// Download the vulnerability database if it is stale, as a separate step.
@@ -428,20 +457,23 @@ fn update_db(scan_id: &str) -> bool {
         "security-scan-progress",
         serde_json::json!({ "scanId": scan_id, "stage": "database", "bytes": 0 }),
     );
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<String>(64);
     // Drained on another thread: `ByLine` blocks the writer once the channel
     // buffer backs up, and nothing here wants the scanner's chatter.
     std::thread::spawn(move || while rx.recv().is_ok() {});
     let before = scanner_metadata().1;
 
-    let cancelled = streaming_cmd::run_streaming(
-        &db_job_id(scan_id),
-        trivy_cmd(&["image", "--download-db-only"]),
-        "trivy",
-        OutputSink::ByLine(tx),
-        |_| {},
-    )
-    .is_ok_and(|outcome| outcome.cancelled);
+    let cancelled = trivy_cmd(&["image", "--download-db-only"])
+        .and_then(|command| {
+            streaming_cmd::run_streaming(
+                &db_job_id(scan_id),
+                command,
+                "trivy",
+                OutputSink::ByLine(tx),
+                |_| {},
+            )
+        })
+        .is_ok_and(|outcome| outcome.cancelled);
 
     // A newer database can turn a clean image into a vulnerable one without the
     // image changing at all, so every cached result is now answering a question
@@ -457,7 +489,11 @@ fn update_db(scan_id: &str) -> bool {
 ///
 /// Blocking: call it from `helpers::run_blocking`. Progress is published to SSE
 /// under `scan_id`, and the same id cancels it.
-pub fn scan_image_blocking(scan_id: &str, image_ref: &str, refresh: bool) -> Result<ScanResult, String> {
+pub fn scan_image_blocking(
+    scan_id: &str,
+    image_ref: &str,
+    refresh: bool,
+) -> Result<ScanResult, String> {
     require_scan_id(scan_id)?;
     require_image_ref(image_ref)?;
 
@@ -470,7 +506,9 @@ pub fn scan_image_blocking(scan_id: &str, image_ref: &str, refresh: bool) -> Res
 
     // From here on there are child processes to cancel, so the armed-cancel
     // bookkeeping has to be cleaned up however this function leaves.
-    let _guard = CancelGuard { scan_id: scan_id.to_string() };
+    let _guard = CancelGuard {
+        scan_id: scan_id.to_string(),
+    };
 
     if update_db(scan_id) {
         return Err("Scan cancelled".to_string());
@@ -481,7 +519,7 @@ pub fn scan_image_blocking(scan_id: &str, image_ref: &str, refresh: bool) -> Res
         serde_json::json!({ "scanId": scan_id, "stage": "scan", "bytes": 0 }),
     );
 
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<String>(64);
     // The report is JSON on stdout; collect it while the process runs rather
     // than after it, so a cancel takes effect immediately and a large report
     // never sits in a pipe buffer waiting for a reader.
@@ -511,7 +549,7 @@ pub fn scan_image_blocking(scan_id: &str, image_ref: &str, refresh: bool) -> Res
             "vuln",
             "--",
             image_ref,
-        ]),
+        ])?,
         "trivy",
         OutputSink::ByLine(tx),
         |bytes| {
@@ -557,74 +595,92 @@ pub fn export_sbom_blocking(
     format: SbomFormat,
     overwrite: bool,
 ) -> Result<String, String> {
-    require_image_ref(image_ref)?;
-    require_plain("Destination folder", dest_dir)?;
-    require_plain("File name", file_name)?;
-
-    let base = std::path::Path::new(dest_dir);
-    if !base.is_dir() {
-        return Err(format!("Destination folder does not exist: {}", dest_dir));
-    }
-    let dest = base.join(file_name);
-    // The base is the folder the caller named, not the candidate's own parent —
-    // that is what makes `../` in the file name a rejection rather than a
-    // tautology. Same rule as `commands::file_transfer`.
-    crate::validation::assert_path_within(base, &dest)?;
-
-    if dest.exists() && !overwrite {
-        return Err(format!(
-            "{} already exists. Choose another name or confirm overwriting.",
-            dest.display()
-        ));
-    }
-
-    // Written to a scratch file and renamed, so a failed or killed export cannot
-    // leave a truncated SBOM at the path the user chose. A half-written document
-    // that looks complete is worse than no document.
-    let scratch = base.join(format!(".{}.part", file_name));
-    crate::validation::assert_path_within(base, &scratch)?;
-    let _ = std::fs::remove_file(&scratch);
-
-    let out = trivy_cmd(&[
-        "image",
-        "--skip-db-update",
-        "--image-src",
-        LOCAL_IMAGE_SOURCES,
-        "--format",
-        format.as_trivy_arg(),
-        "--output",
-        &scratch.to_string_lossy(),
-        "--",
-        image_ref,
-    ])
-    .output()
-    .map_err(|e| crate::redact::redact_err("Cannot run the scanner", e))?;
-
-    if !out.status.success() {
-        let _ = std::fs::remove_file(&scratch);
-        return Err(crate::redact::redact(&String::from_utf8_lossy(&out.stderr)));
-    }
-
-    std::fs::rename(&scratch, &dest).map_err(|e| {
-        let _ = std::fs::remove_file(&scratch);
-        crate::redact::redact_err("Cannot write the SBOM", e)
-    })?;
-    Ok(dest.to_string_lossy().to_string())
+    export_sbom_with(image_ref, dest_dir, file_name, overwrite, || {
+        trivy_cmd(&[
+            "image",
+            "--skip-db-update",
+            "--image-src",
+            LOCAL_IMAGE_SOURCES,
+            "--format",
+            format.as_trivy_arg(),
+            "--",
+            image_ref,
+        ])
+    })
 }
 
-/// Reject a path component that is empty, carries control characters, or would
-/// be read as a flag. Mirrors `commands::file_transfer::require_plain`.
-fn require_plain(label: &str, value: &str) -> Result<(), String> {
-    if value.trim().is_empty() {
-        return Err(format!("{} must not be empty", label));
-    }
-    if value.chars().any(|c| c.is_control()) {
-        return Err(format!("{} contains control characters", label));
-    }
-    if value.trim_start().starts_with('-') {
-        return Err(format!("{} must not start with '-'", label));
-    }
-    Ok(())
+// Keep command acquisition lazy: destination admission must precede scanner and
+// engine probes. Tests replace this volatile boundary, retaining the real
+// validator, registry, owned process, scratch publication and settlement.
+fn export_sbom_with(
+    image_ref: &str,
+    dest_dir: &str,
+    file_name: &str,
+    overwrite: bool,
+    command: impl FnOnce() -> Result<std::process::Command, String>,
+) -> Result<String, String> {
+    require_image_ref(image_ref)?;
+    let dest = crate::validation::resolve_host_output(dest_dir, file_name, overwrite)?;
+    static NEXT_EXPORT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let job = format!(
+        "sbom-{}-{}",
+        std::process::id(),
+        NEXT_EXPORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    use crate::transfer_registry::{self as registry, TransferStatus};
+    registry::register(&job, "sbom", image_ref, None, Some(dest.clone()))?;
+    let guard = registry::JobGuard::new(&job);
+    let result = (|| {
+        if !registry::set_running(&job) {
+            return Ok(streaming_cmd::StreamOutcome {
+                bytes: 0,
+                cancelled: true,
+            });
+        }
+        let cmd = command()?;
+        if registry::is_cancel_requested(&job) {
+            return Ok(streaming_cmd::StreamOutcome {
+                bytes: 0,
+                cancelled: true,
+            });
+        }
+        streaming_cmd::run_streaming_with_commit(
+            &job,
+            cmd,
+            "trivy",
+            if overwrite {
+                OutputSink::ToFile(dest.clone())
+            } else {
+                OutputSink::ToNewFile(dest.clone())
+            },
+            |bytes| registry::update_bytes(&job, bytes),
+            |partial, destination, overwrite| {
+                super::file_transfer::publish_output(&job, partial, destination, overwrite)
+            },
+        )
+    })();
+    let result = match result {
+        Ok(outcome) if outcome.cancelled => {
+            registry::settle(&job, TransferStatus::Cancelled, 0, None);
+            Err("SBOM export cancelled".into())
+        }
+        Ok(outcome) => {
+            registry::settle(&job, TransferStatus::Success, outcome.bytes, None);
+            Ok(dest.to_string_lossy().to_string())
+        }
+        Err(_) if registry::is_cancel_requested(&job) => {
+            registry::settle(&job, TransferStatus::Cancelled, 0, None);
+            Err("SBOM export cancelled".into())
+        }
+        Err(error) => {
+            let error = crate::redact::redact(&error);
+            registry::settle(&job, TransferStatus::Failed, 0, Some(error.clone()));
+            Err(error)
+        }
+    };
+    streaming_cmd::disarm_cancel(&job);
+    guard.done();
+    result
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -724,7 +780,11 @@ pub fn audit_image_blocking(
     let facts = crate::commands::security_rules::collect_facts_blocking(image_ref)?;
     let evaluation = crate::commands::security_rules::evaluate(&facts, level, now_ms);
     let score = crate::commands::security_score::score(&scan, &evaluation, level);
-    let audit = SecurityAudit { scan, evaluation, score };
+    let audit = SecurityAudit {
+        scan,
+        evaluation,
+        score,
+    };
 
     Ok(audit)
 }
@@ -779,6 +839,203 @@ pub async fn security_sbom_export(
 mod tests {
     use super::*;
 
+    struct ExportDir(std::path::PathBuf);
+    impl ExportDir {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../tmp")
+                .join(format!(
+                    "sbom-空間-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path.canonicalize().unwrap())
+        }
+    }
+    impl Drop for ExportDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn export_fixture(mode: &str) -> std::process::Command {
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "commands::security_scan::tests::sbom_output_fixture",
+            "--ignored",
+            "--nocapture",
+        ]);
+        cmd.env("COLIMA_SBOM_FIXTURE", mode);
+        cmd
+    }
+
+    #[test]
+    #[ignore = "owned process fixture, invoked by scanner export guard"]
+    fn sbom_output_fixture() {
+        use std::io::Write;
+        std::io::stdout()
+            .write_all("SBOM-PAYLOAD:unmodified bytes 空間".as_bytes())
+            .unwrap();
+        std::io::stdout().flush().unwrap();
+        if std::env::var("COLIMA_SBOM_FIXTURE").unwrap() == "failure" {
+            eprintln!("fixture scanner failed");
+            std::process::exit(3);
+        }
+    }
+
+    // TC-WINUI-012/028: actual validator/claim/process/publication/settlement,
+    // with only scanner command acquisition substituted. Separate process keeps
+    // the production global registry isolated from other library test fixtures.
+    #[test]
+    fn sbom_exports_share_transfer_claims_and_preserve_prior_bytes() {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "commands::security_scan::tests::sbom_claim_fixture",
+            "--ignored",
+            "--nocapture",
+        ]);
+        let output =
+            crate::child_process::capture(command, Duration::from_secs(20), 1024 * 1024).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated registry/export fixture invoked by guarding test"]
+    fn sbom_claim_fixture() {
+        use crate::transfer_registry::{self as registry, TransferStatus};
+        let dir = ExportDir::new();
+        let destination = dir.0.join("report.json");
+        let selected = dir.0.join(".").to_string_lossy().into_owned();
+        std::fs::write(&destination, b"prior bytes").unwrap();
+        for invalid in ["../escape.json", "nested/report.json", "", ".", "-o"] {
+            assert!(
+                export_sbom_with("fixture:local", &selected, invalid, true, || panic!(
+                    "invalid path acquired a scanner"
+                ))
+                .is_err()
+            );
+        }
+        #[cfg(windows)]
+        for invalid in [
+            "report.json:hidden",
+            "CON.json",
+            "C:report.json",
+            "report.json.",
+            "folder\\report.json",
+        ] {
+            assert!(
+                export_sbom_with("fixture:local", &selected, invalid, true, || panic!(
+                    "invalid native path acquired a scanner"
+                ))
+                .is_err()
+            );
+        }
+        registry::register(
+            "owned-tar",
+            "save",
+            "fixture",
+            None,
+            Some(destination.clone()),
+        )
+        .unwrap();
+        let error = export_sbom_blocking(
+            "fixture:local",
+            &selected,
+            "report.json",
+            SbomFormat::Spdx,
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("Another transfer"),
+            "conflict must precede scanner/engine discovery: {error}"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"prior bytes");
+        registry::settle("owned-tar", TransferStatus::Success, 0, None);
+
+        let error = export_sbom_with("fixture:local", &selected, "report.json", true, || {
+            assert!(registry::register(
+                "conflicting-tar",
+                "save",
+                "fixture",
+                None,
+                Some(destination.clone())
+            )
+            .is_err());
+            Ok(export_fixture("failure"))
+        })
+        .unwrap_err();
+        assert!(error.contains("fixture scanner failed"), "{error}");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"prior bytes");
+        assert!(registry::list()
+            .iter()
+            .any(|entry| entry.kind == "sbom" && entry.status == TransferStatus::Failed));
+        registry::register(
+            "released-after-error",
+            "save",
+            "fixture",
+            None,
+            Some(destination.clone()),
+        )
+        .unwrap();
+        registry::settle("released-after-error", TransferStatus::Success, 0, None);
+
+        let error = export_sbom_with("fixture:local", &selected, "report.json", true, || {
+            let running = registry::list()
+                .into_iter()
+                .find(|entry| entry.kind == "sbom" && entry.status == TransferStatus::Running)
+                .unwrap();
+            assert_eq!(
+                crate::commands::file_transfer::cancel_transfer_job(&running.job_id),
+                registry::CancelOutcome::Cancelled
+            );
+            Err("cancelled while acquiring scanner".into())
+        })
+        .unwrap_err();
+        assert_eq!(error, "SBOM export cancelled");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"prior bytes");
+        assert!(registry::list()
+            .iter()
+            .any(|entry| entry.kind == "sbom" && entry.status == TransferStatus::Cancelled));
+
+        let written = export_sbom_with("fixture:local", &selected, "report.json", true, || {
+            Ok(export_fixture("success"))
+        })
+        .unwrap();
+        assert_eq!(std::path::Path::new(&written), destination);
+        let bytes = std::fs::read(&destination).unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("SBOM-PAYLOAD:unmodified bytes 空間"));
+        assert!(registry::list().iter().any(|entry| entry.kind == "sbom"
+            && entry.status == TransferStatus::Success
+            && entry.bytes == bytes.len() as u64));
+        registry::register(
+            "released-after-success",
+            "save",
+            "fixture",
+            None,
+            Some(destination),
+        )
+        .unwrap();
+        registry::settle("released-after-success", TransferStatus::Success, 0, None);
+        assert!(!registry::list()
+            .iter()
+            .any(|entry| !entry.status.is_terminal()));
+        assert_eq!(
+            std::fs::read_dir(&dir.0).unwrap().count(),
+            1,
+            "no partial file survives"
+        );
+    }
+
     fn fixture(name: &str) -> String {
         std::fs::read_to_string(format!("tests/fixtures/{}", name))
             .unwrap_or_else(|e| panic!("fixture {}: {}", name, e))
@@ -810,7 +1067,10 @@ mod tests {
         let findings = parse_trivy_report(&fixture("trivy-mixed.json")).expect("parse");
         assert_eq!(findings.len(), 3);
 
-        let critical = findings.iter().find(|f| f.id == "CVE-2024-0001").expect("cve");
+        let critical = findings
+            .iter()
+            .find(|f| f.id == "CVE-2024-0001")
+            .expect("cve");
         assert_eq!(critical.severity, Severity::Critical);
         assert_eq!(critical.package, "openssl");
         assert_eq!(critical.fixed_version.as_deref(), Some("3.0.13-r0"));
@@ -819,7 +1079,10 @@ mod tests {
 
         // No fix published: distinct from an empty string, because it decides
         // whether the user can do anything about it.
-        let unfixed = findings.iter().find(|f| f.id == "CVE-2024-0002").expect("cve");
+        let unfixed = findings
+            .iter()
+            .find(|f| f.id == "CVE-2024-0002")
+            .expect("cve");
         assert!(unfixed.fixed_version.is_none());
     }
 
@@ -879,7 +1142,10 @@ mod tests {
         // mattered — so the new build must miss, then store separately.
         assert!(cached("sha256:bbb").is_none());
         store(&result("myapp:latest", "sha256:bbb"));
-        assert!(cached("sha256:aaa").is_some(), "the old image is still cached");
+        assert!(
+            cached("sha256:aaa").is_some(),
+            "the old image is still cached"
+        );
         assert!(cached("sha256:bbb").is_some());
         invalidate();
         assert!(cached("sha256:aaa").is_none());
@@ -915,8 +1181,8 @@ mod tests {
 
     #[test]
     fn sbom_export_refuses_to_escape_the_chosen_folder() {
-        let dir = std::env::temp_dir().join("colimaui-sbom-test");
-        std::fs::create_dir_all(&dir).expect("mkdir");
+        let owned = ExportDir::new();
+        let dir = &owned.0;
         let dir_str = dir.to_string_lossy().to_string();
 
         for bad in ["../escape.json", "-o", ""] {
@@ -931,10 +1197,14 @@ mod tests {
         // An existing destination is refused unless overwriting is explicit.
         let existing = dir.join("taken.json");
         std::fs::write(&existing, b"{}").expect("write");
-        let err = export_sbom_blocking("nginx:alpine", &dir_str, "taken.json", SbomFormat::Spdx, false)
-            .expect_err("must refuse");
+        let err = export_sbom_blocking(
+            "nginx:alpine",
+            &dir_str,
+            "taken.json",
+            SbomFormat::Spdx,
+            false,
+        )
+        .expect_err("must refuse");
         assert!(err.contains("already exists"), "got: {}", err);
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -66,30 +66,12 @@ if git tag -l "$TAG" | grep -q "$TAG"; then
   exit 1
 fi
 
-# --- Update versions ---
-echo -e "${CYAN}📝 Updating package.json...${NC}"
-node -e "
-  const fs = require('fs');
-  const pkg = JSON.parse(fs.readFileSync('package.json'));
-  pkg.version = '${NEW_VERSION}';
-  fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-"
-
-echo -e "${CYAN}📝 Updating src-tauri/Cargo.toml...${NC}"
-sed -i.bak "s/^version = \".*\"/version = \"${NEW_VERSION}\"/" src-tauri/Cargo.toml
-rm -f src-tauri/Cargo.toml.bak
-
-echo -e "${CYAN}📝 Updating src-tauri/tauri.conf.json...${NC}"
-node -e "
-  const fs = require('fs');
-  const conf = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json'));
-  conf.version = '${NEW_VERSION}';
-  fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
-"
+# --- Update all semantic version carriers (POSIX entry, portable owner) ---
+node scripts/release-version.mjs "$NEW_VERSION"
 
 # --- Commit + tag + push ---
 echo -e "${CYAN}📦 Committing version bump...${NC}"
-git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json
+git add package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
 git commit -m "chore(release): v${NEW_VERSION}"
 
 echo -e "${CYAN}🏷️  Creating tag ${TAG}...${NC}"

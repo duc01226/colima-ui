@@ -20,6 +20,11 @@ pub fn contains_shell_injection(input: &str) -> bool {
     false
 }
 
+/// Stable IDs carried by Docker resource lists, rather than names/CLI options.
+pub fn is_stable_container_id(id: &str) -> bool {
+    (12..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Validate container_id format (hex string, 1-128 chars)
 pub fn is_valid_container_id(id: &str) -> bool {
     !id.is_empty()
@@ -140,7 +145,11 @@ fn is_safe_cli_name(name: &str, max_len: usize) -> bool {
         return false;
     }
     // Leading character carries the argv- and path-injection risk.
-    if !name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
+    if !name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+    {
         return false;
     }
     if name.contains("..") {
@@ -163,6 +172,107 @@ pub fn ensure_valid_profile(profile: &str) -> Result<(), String> {
             "Invalid profile name: {:?}. Use letters, digits, '-', '_' or '.', starting with a letter or digit.",
             profile
         ))
+    }
+}
+
+/// Host output names are one directory entry, never another path or NT stream.
+pub fn ensure_host_file_name(name: &str) -> Result<(), String> {
+    let mut parts = std::path::Path::new(name).components();
+    if !matches!(parts.next(), Some(std::path::Component::Normal(_))) || parts.next().is_some() {
+        return Err("Choose a file name within the selected folder".into());
+    }
+    #[cfg(windows)]
+    {
+        let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+        if name.ends_with([' ', '.'])
+            || name
+                .chars()
+                .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c))
+            || ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
+            || (stem.len() == 4
+                && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+        {
+            return Err(
+                "Choose an ordinary Windows file name without reserved names or alternate streams"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a caller-selected output folder/name to the canonical identity used
+/// by all file-export claims. Confinement is against the selected folder;
+/// canonical parent/target identity also closes directory-alias claim bypasses.
+pub fn resolve_host_output(
+    dir: &str,
+    file_name: &str,
+    overwrite: bool,
+) -> Result<std::path::PathBuf, String> {
+    for (label, value) in [("Destination folder", dir), ("File name", file_name)] {
+        if value.trim().is_empty() {
+            return Err(format!("{label} must not be empty"));
+        }
+        if value.chars().any(|c| c.is_control()) {
+            return Err(format!("{label} contains control characters"));
+        }
+        if value.trim_start().starts_with('-') {
+            return Err(format!("{label} must not start with '-'"));
+        }
+    }
+    ensure_host_file_name(file_name)?;
+    let base = std::path::Path::new(dir);
+    if !base.is_dir() {
+        return Err(format!("Destination folder does not exist: {dir}"));
+    }
+    let candidate = base.join(file_name);
+    assert_path_within(base, &candidate)?;
+    if candidate.exists() && !overwrite {
+        return Err(format!(
+            "{} already exists. Choose another name or confirm overwriting.",
+            candidate.display()
+        ));
+    }
+    if candidate.exists() {
+        candidate
+            .canonicalize()
+            .map_err(|e| format!("Cannot resolve destination: {e}"))
+    } else {
+        let parent = candidate
+            .parent()
+            .ok_or("Destination has no parent")?
+            .canonicalize()
+            .map_err(|e| format!("Cannot resolve destination folder: {e}"))?;
+        Ok(parent.join(
+            candidate
+                .file_name()
+                .ok_or("Destination has no file name")?,
+        ))
+    }
+}
+
+/// Callers canonicalize existing parents first. Windows comparison deliberately
+/// refuses case aliases conservatively, even in a case-sensitive directory.
+pub fn same_host_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let a: Vec<_> = a.as_os_str().encode_wide().collect();
+        let b: Vec<_> = b.as_os_str().encode_wide().collect();
+        unsafe {
+            windows_sys::Win32::Globalization::CompareStringOrdinal(
+                a.as_ptr(),
+                a.len() as i32,
+                b.as_ptr(),
+                b.len() as i32,
+                1,
+            ) == 2
+        }
     }
 }
 
@@ -190,7 +300,10 @@ pub fn ensure_valid_profile(profile: &str) -> Result<(), String> {
 /// Note that [`contains_shell_injection`] is a metacharacter denylist for
 /// user-typed exec commands. It is **not** a path guard and must not be
 /// substituted for this function.
-pub fn assert_path_within(base: &std::path::Path, candidate: &std::path::Path) -> Result<(), String> {
+pub fn assert_path_within(
+    base: &std::path::Path,
+    candidate: &std::path::Path,
+) -> Result<(), String> {
     let base = base
         .canonicalize()
         .map_err(|e| format!("Cannot resolve base directory {}: {}", base.display(), e))?;
@@ -228,8 +341,90 @@ mod tests {
     use super::*;
 
     #[test]
+    fn output_parent_aliases_resolve_to_one_identity_without_changing_prior_bytes() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tmp")
+            .join(format!(
+                "output-identity-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let canonical = root.canonicalize().unwrap();
+        let alias = canonical.join("nested").join("..");
+        let resolve = |dir: &std::path::Path, overwrite| {
+            resolve_host_output(dir.to_str().unwrap(), "report 空間.json", overwrite)
+        };
+        let intended = canonical.join("report 空間.json");
+        assert_eq!(resolve(&canonical, false).unwrap(), intended);
+        assert_eq!(resolve(&alias, false).unwrap(), intended);
+        std::fs::write(&intended, b"retained output").unwrap();
+        assert!(resolve(&alias, false).is_err());
+        assert_eq!(resolve(&alias, true).unwrap(), intended);
+        assert_eq!(std::fs::read(intended).unwrap(), b"retained output");
+    }
+
+    #[test]
+    fn host_output_names_cannot_choose_another_directory() {
+        for name in [
+            "",
+            "..",
+            ".",
+            "../outside.tar",
+            "/outside.tar",
+            "nested/file.tar",
+        ] {
+            assert!(ensure_host_file_name(name).is_err(), "{name}");
+        }
+        ensure_host_file_name("archive 空間.tar").unwrap();
+        #[cfg(windows)]
+        for name in [
+            "C:escape.tar",
+            "file.tar:secret",
+            "CON.tar",
+            "nul",
+            "LPT9.tar",
+            "file.tar.",
+            "file.tar ",
+            "folder\\file.tar",
+            "C:\\outside.tar",
+        ] {
+            assert!(ensure_host_file_name(name).is_err(), "{name}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_case_aliases_cannot_obtain_separate_destination_claims() {
+        assert!(same_host_path(
+            std::path::Path::new(r"C:\Folder\File.tar"),
+            std::path::Path::new(r"c:\folder\file.TAR")
+        ));
+        assert!(!same_host_path(
+            std::path::Path::new(r"C:\Folder\File.tar"),
+            std::path::Path::new(r"D:\Folder\File.tar")
+        ));
+    }
+
+    #[test]
     fn accepts_realistic_profile_names() {
-        for name in ["default", "dev", "k8s-test", "my_profile", "colima.v2", "a", "test123"] {
+        for name in [
+            "default",
+            "dev",
+            "k8s-test",
+            "my_profile",
+            "colima.v2",
+            "a",
+            "test123",
+        ] {
             assert!(is_valid_profile_name(name), "should accept: {name}");
         }
     }
@@ -244,7 +439,16 @@ mod tests {
 
     #[test]
     fn rejects_path_traversal() {
-        for name in ["..", "../etc", "../../etc/passwd", "a/../..", ".hidden", "/abs", "a/b", "a\\b"] {
+        for name in [
+            "..",
+            "../etc",
+            "../../etc/passwd",
+            "a/../..",
+            ".hidden",
+            "/abs",
+            "a/b",
+            "a\\b",
+        ] {
             assert!(!is_valid_profile_name(name), "should reject: {name}");
         }
     }
@@ -259,7 +463,9 @@ mod tests {
     #[test]
     fn rejects_empty_and_overlong() {
         assert!(!is_valid_profile_name(""));
-        assert!(!is_valid_profile_name(&"a".repeat(MAX_PROFILE_NAME_LEN + 1)));
+        assert!(!is_valid_profile_name(
+            &"a".repeat(MAX_PROFILE_NAME_LEN + 1)
+        ));
         assert!(is_valid_profile_name(&"a".repeat(MAX_PROFILE_NAME_LEN)));
     }
 

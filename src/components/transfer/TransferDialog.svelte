@@ -19,19 +19,23 @@
   import { startJob } from "../../store/notifications.svelte";
   import { isRunningInTauri } from "../../lib/env";
   import { globalToast } from "../../lib/globalToast";
+  import { isDockerOnlyHost } from "../../store/capabilities.svelte";
   import { t } from "../../lib/i18n.svelte";
+  import { recoveryDraft } from "../../lib/recoveryDrafts.svelte";
 
   interface Props {
     mode: TransferMode;
     /** Image references, for export. */
     images?: string[];
+    /** Selected image content, separate from mutable export references. */
+    imageIds?: string[];
     /** Container id, for either copy direction. */
     containerId?: string;
     containerLabel?: string;
     onClose: () => void;
   }
 
-  let { mode, images = [], containerId = "", containerLabel = "", onClose }: Props = $props();
+  let { mode, images = [], imageIds = [], containerId = "", containerLabel = "", onClose }: Props = $props();
 
   const isTauri = isRunningInTauri();
 
@@ -44,6 +48,11 @@
   let hostPath = $state("");
   let containerPath = $state("");
   let overwrite = $state(false);
+
+  recoveryDraft("transfer-input", () => ({ mode, containerId, images: [...images], imageIds: [...imageIds], destDir, fileName, tarPath, hostPath, containerPath, overwrite }), (draft) => {
+    if (draft.mode !== mode || draft.containerId !== containerId || draft.images.length !== images.length || draft.images.some((image, i) => image !== images[i]) || draft.imageIds.length !== imageIds.length || draft.imageIds.some((id, i) => id !== imageIds[i])) return;
+    ({ destDir, fileName, tarPath, hostPath, containerPath, overwrite } = draft);
+  });
 
   let starting = $state(false);
   /**
@@ -71,7 +80,7 @@
    * folder it came from.
    */
   function baseName(path: string): string {
-    return path.split("/").filter(Boolean).pop() ?? path;
+    return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
   }
 
   /**
@@ -144,9 +153,10 @@
         if (typeof chosen === "string") {
           // Split the chosen path: the backend confines the write to the folder,
           // which only works if the folder arrives separately from the name.
-          const cut = chosen.lastIndexOf("/");
-          destDir = cut > 0 ? chosen.slice(0, cut) : "/";
-          fileName = withTarSuffix(chosen.slice(cut + 1));
+          const { dirname, basename } = await import("@tauri-apps/api/path");
+          const [folder, name] = await Promise.all([dirname(chosen), basename(chosen)]);
+          destDir = folder;
+          fileName = withTarSuffix(name);
         }
       }
     } catch (e) {
@@ -229,7 +239,7 @@
         <label>
           <span>{t("transfer.archive", { default: "Archive (.tar)" })}</span>
           <div class="row">
-            <input bind:value={tarPath} placeholder="/path/to/images.tar" />
+            <input bind:value={tarPath} placeholder={isDockerOnlyHost() ? "C:\\Users\\name\\images.tar" : "/path/to/images.tar"} />
             {#if isTauri}
               <button class="btn btn-ghost" onclick={() => pick("openFile")}>
                 {t("transfer.browse", { default: "Browse…" })}
@@ -241,9 +251,9 @@
 
       {#if mode === "copy-in"}
         <label>
-          <span>{t("transfer.host_file", { default: "File on this machine" })}</span>
+          <span>{t("connection.host_path")}</span>
           <div class="row">
-            <input bind:value={hostPath} placeholder="/path/to/file" />
+            <input bind:value={hostPath} placeholder={isDockerOnlyHost() ? "C:\\Users\\name\\data.json" : "/path/to/file"} />
             {#if isTauri}
               <button class="btn btn-ghost" onclick={() => pick("openFile")}>
                 {t("transfer.browse", { default: "Browse…" })}
@@ -273,9 +283,9 @@
 
       {#if mode === "export" || mode === "copy-out"}
         <label>
-          <span>{t("transfer.dest_folder", { default: "Destination folder" })}</span>
+          <span>{t("connection.host_dir")}</span>
           <div class="row">
-            <input bind:value={destDir} placeholder="/Users/you/Downloads" />
+            <input bind:value={destDir} placeholder={isDockerOnlyHost() ? "C:\\Users\\name\\Downloads" : "/Users/you/Downloads"} />
             {#if isTauri}
               <button
                 class="btn btn-ghost"

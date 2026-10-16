@@ -40,7 +40,7 @@ struct ComposeServiceSpec {
     #[serde(default)]
     image: Option<String>,
     #[serde(default)]
-    depends_on: Option<serde_yml::Value>,
+    depends_on: Option<serde_norway::Value>,
 }
 
 /// Read `depends_on` in both shapes the compose spec allows.
@@ -48,13 +48,13 @@ struct ComposeServiceSpec {
 /// The short form is a list of names; the long form is a map keyed by name with
 /// a condition. Handling only one of them would silently drop every dependency
 /// in projects that use the other.
-fn parse_depends_on(value: Option<&serde_yml::Value>) -> Vec<String> {
+fn parse_depends_on(value: Option<&serde_norway::Value>) -> Vec<String> {
     match value {
-        Some(serde_yml::Value::Sequence(items)) => items
+        Some(serde_norway::Value::Sequence(items)) => items
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect(),
-        Some(serde_yml::Value::Mapping(map)) => map
+        Some(serde_norway::Value::Mapping(map)) => map
             .iter()
             .filter_map(|(k, _)| k.as_str().map(|s| s.to_string()))
             .collect(),
@@ -70,7 +70,7 @@ fn parse_file(path: &str) -> Option<Vec<(String, ComposeServiceSpec)>> {
         return None;
     }
     let raw = std::fs::read_to_string(path).ok()?;
-    let parsed: ComposeFile = serde_yml::from_str(&raw).ok()?;
+    let parsed: ComposeFile = serde_norway::from_str(&raw).ok()?;
     Some(parsed.services.into_iter().collect())
 }
 
@@ -160,11 +160,11 @@ mod tests {
     /// every dependency in projects using the other.
     #[test]
     fn depends_on_reads_list_and_map_forms() {
-        let list: serde_yml::Value = serde_yml::from_str("[db, cache]").unwrap();
+        let list: serde_norway::Value = serde_norway::from_str("[db, cache]").unwrap();
         assert_eq!(parse_depends_on(Some(&list)), vec!["db", "cache"]);
 
-        let map: serde_yml::Value =
-            serde_yml::from_str("db:\n  condition: service_healthy\n").unwrap();
+        let map: serde_norway::Value =
+            serde_norway::from_str("db:\n  condition: service_healthy\n").unwrap();
         assert_eq!(parse_depends_on(Some(&map)), vec!["db"]);
 
         assert!(parse_depends_on(None).is_empty());
@@ -228,5 +228,44 @@ mod tests {
         let (services, warnings) = declared_services(&[project("bare", "")]);
         assert!(services.is_empty());
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn aliased_services_and_quoted_names_survive_an_independent_malformed_file() {
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let parent =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp/parser-fixtures");
+        std::fs::create_dir_all(&parent).unwrap();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = Scratch(parent.join(format!("compose-{}-{unique}", std::process::id())));
+        std::fs::create_dir(&scratch.0).unwrap();
+        let good = write_temp(&scratch.0, "compose 空間.yml", "x-service: &service\n  image: 'node:20'\n  depends_on: ['db']\nservices:\n  api: *service\n  db:\n    image: 'on'\n");
+        let bad = write_temp(&scratch.0, "malformed.yml", "services: [unterminated");
+        let (services, warnings) =
+            declared_services(&[project("good", &good), project("bad", &bad)]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("bad"));
+        assert_eq!(services.len(), 2);
+        assert_eq!(
+            services.iter().find(|row| row.name == "api").unwrap(),
+            &ComposeService {
+                project: "good".into(),
+                name: "api".into(),
+                image: "node:20".into(),
+                depends_on: vec!["db".into()]
+            }
+        );
+        assert_eq!(
+            services.iter().find(|row| row.name == "db").unwrap().image,
+            "on"
+        );
     }
 }

@@ -154,8 +154,15 @@ pub fn redact_compose(yaml: &str) -> String {
         let key = trimmed.trim_start_matches("- ").trim();
 
         // Inline forms: `environment: {FOO: bar}` / `secrets: [db_password]`.
-        if let Some(rest) = key.strip_prefix("environment:").or_else(|| key.strip_prefix("secrets:")) {
-            let label = if key.starts_with("secrets:") { "secrets" } else { "environment" };
+        if let Some(rest) = key
+            .strip_prefix("environment:")
+            .or_else(|| key.strip_prefix("secrets:"))
+        {
+            let label = if key.starts_with("secrets:") {
+                "secrets"
+            } else {
+                "environment"
+            };
             if rest.trim().is_empty() {
                 // Block form — blank every line until the block closes.
                 out.push_str(&format!("{}{}: # [redacted]\n", " ".repeat(indent), label));
@@ -169,8 +176,14 @@ pub fn redact_compose(yaml: &str) -> String {
         // `env_file` is kept as a reference so the diagnosis can mention it, but
         // the file it points at is never opened.
         if key.starts_with("env_file:") {
-            out.push_str(&format!("{}env_file: # [not inlined]\n", " ".repeat(indent)));
-            if key.strip_prefix("env_file:").is_some_and(|r| r.trim().is_empty()) {
+            out.push_str(&format!(
+                "{}env_file: # [not inlined]\n",
+                " ".repeat(indent)
+            ));
+            if key
+                .strip_prefix("env_file:")
+                .is_some_and(|r| r.trim().is_empty())
+            {
                 redacting_block = Some(indent);
             }
             continue;
@@ -223,7 +236,9 @@ fn build_llm_preview(file_path: &str, raw_error: &str, redacted_yaml: &str) -> S
 /// `--quiet` validates without dumping the resolved config, so success costs
 /// nothing to parse and failure still writes the full message to stderr.
 #[tauri::command]
-pub async fn compose_validate(file_path: String) -> Result<ComposeValidation, crate::error::ColimaError> {
+pub async fn compose_validate(
+    file_path: String,
+) -> Result<ComposeValidation, crate::error::ColimaError> {
     async move {
         ensure_compose_path(&file_path)?;
 
@@ -235,18 +250,8 @@ pub async fn compose_validate(file_path: String) -> Result<ComposeValidation, cr
             "--quiet".to_string(),
         ];
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            tokio::task::spawn_blocking(move || {
-                crate::commands::runtime::get_runtime_cmd()
-                    .args(args.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
-                    .output()
-                    .map_err(|e| format!("Failed to run docker compose config: {}", e))
-            }),
-        )
-        .await
-        .map_err(|_| "docker compose config timed out".to_string())?
-        .map_err(|e| format!("Task join error: {}", e))??;
+        let output =
+            crate::commands::runtime::run(args.into(), std::time::Duration::from_secs(30)).await?;
 
         if output.status.success() {
             return Ok(ComposeValidation {
@@ -274,7 +279,9 @@ pub async fn compose_validate(file_path: String) -> Result<ComposeValidation, cr
 /// Returns a redacted LLM payload alongside the result but never sends it; the
 /// user decides whether the model is worth asking.
 #[tauri::command]
-pub async fn compose_diagnose(file_path: String) -> Result<ComposeDiagnosis, crate::error::ColimaError> {
+pub async fn compose_diagnose(
+    file_path: String,
+) -> Result<ComposeDiagnosis, crate::error::ColimaError> {
     let validation = compose_validate(file_path.clone()).await?;
 
     if validation.valid {
@@ -291,8 +298,10 @@ pub async fn compose_diagnose(file_path: String) -> Result<ComposeDiagnosis, cra
 
     // Read the file only to build the redacted preview. A file that cannot be
     // read is not fatal — the Docker error alone is still worth showing.
-    let redacted = std::fs::read_to_string(&file_path)
-        .map_or_else(|_| "# compose file could not be read".to_string(), |raw| redact_compose(&raw));
+    let redacted = std::fs::read_to_string(&file_path).map_or_else(
+        |_| "# compose file could not be read".to_string(),
+        |raw| redact_compose(&raw),
+    );
 
     let needs_llm = kb.solutions.is_empty();
 
@@ -334,7 +343,11 @@ services:
     fn redaction_removes_inline_environment_values() {
         let yaml = "services:\n  api:\n    environment: {API_TOKEN: sk-live-abc123}\n";
         let out = redact_compose(yaml);
-        assert!(!out.contains("sk-live-abc123"), "inline token leaked: {}", out);
+        assert!(
+            !out.contains("sk-live-abc123"),
+            "inline token leaked: {}",
+            out
+        );
     }
 
     #[test]
@@ -355,9 +368,14 @@ services:
 
     #[test]
     fn redaction_never_inlines_env_file() {
-        let yaml = "services:\n  api:\n    env_file:\n      - ./.env.production\n    image: myapi\n";
+        let yaml =
+            "services:\n  api:\n    env_file:\n      - ./.env.production\n    image: myapi\n";
         let out = redact_compose(yaml);
-        assert!(!out.contains(".env.production"), "env_file path leaked: {}", out);
+        assert!(
+            !out.contains(".env.production"),
+            "env_file path leaked: {}",
+            out
+        );
         assert!(out.contains("not inlined"));
         assert!(out.contains("myapi"));
     }
@@ -376,7 +394,11 @@ services:
 ";
         let out = redact_compose(yaml);
         assert!(!out.contains("SECRET"));
-        assert!(out.contains("nginx"), "redaction ate the rest of the file: {}", out);
+        assert!(
+            out.contains("nginx"),
+            "redaction ate the rest of the file: {}",
+            out
+        );
         assert!(out.contains("b:"));
     }
 
@@ -420,8 +442,14 @@ services:
     #[test]
     fn categorize_buckets_common_errors() {
         assert_eq!(categorize("yaml: did not find expected key"), "yaml_syntax");
-        assert_eq!(categorize("service \"web\" refers to undefined volume data"), "undefined_reference");
-        assert_eq!(categorize("open /proj/docker-compose.yml: no such file or directory"), "missing_file");
+        assert_eq!(
+            categorize("service \"web\" refers to undefined volume data"),
+            "undefined_reference"
+        );
+        assert_eq!(
+            categorize("open /proj/docker-compose.yml: no such file or directory"),
+            "missing_file"
+        );
     }
 
     /// `services:` written as a list. Verbatim stderr from Docker Compose 5.4.0.
@@ -447,9 +475,14 @@ services:
     #[test]
     fn categorize_schema_still_wins_for_non_structural_type_errors() {
         assert_eq!(categorize("services.web.ports must be a list"), "schema");
-        assert_eq!(categorize("services.web.environment must be a mapping"), "schema");
         assert_eq!(
-            categorize("validating compose.yml: services.web additional properties 'imge' not allowed"),
+            categorize("services.web.environment must be a mapping"),
+            "schema"
+        );
+        assert_eq!(
+            categorize(
+                "validating compose.yml: services.web additional properties 'imge' not allowed"
+            ),
             "schema"
         );
     }

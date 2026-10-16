@@ -1,8 +1,8 @@
-pub mod announcements;
 pub mod agent_loop;
+pub mod ai_chat;
+pub mod announcements;
 /// Start Colima at login, via launchd (macOS) or systemd --user (Linux).
 pub mod autostart;
-pub mod ai_chat;
 pub mod colima;
 pub mod colima_config;
 pub mod compose;
@@ -35,11 +35,11 @@ pub mod models;
 pub mod networks;
 pub mod runtime;
 pub mod searxng;
-/// Image vulnerability scanning. Drives Trivy; never bundles it.
-pub mod security_scan;
 /// Configuration rules for images, and the score built from them.
 pub mod security_catalog;
 pub mod security_rules;
+/// Image vulnerability scanning. Drives Trivy; never bundles it.
+pub mod security_scan;
 pub mod security_score;
 pub mod shell_sandbox;
 pub mod system;
@@ -47,3 +47,5 @@ pub mod system_capabilities;
 pub mod terminal;
 pub mod topology;
 pub mod volumes;
+
+pub mod engine_connection;

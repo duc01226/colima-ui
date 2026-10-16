@@ -22,6 +22,7 @@ use crate::validation::is_valid_k8s_name;
 
 #[tauri::command]
 pub async fn k8s_contexts() -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     run_blocking(|| run_cmd("kubectl", &["config", "get-contexts", "-o", "name"]))
         .await
         .map_err(ColimaError::from)
@@ -29,6 +30,7 @@ pub async fn k8s_contexts() -> Result<String, ColimaError> {
 
 #[tauri::command]
 pub async fn k8s_current_context() -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     run_blocking(|| run_cmd("kubectl", &["config", "current-context"]))
         .await
         .map_err(ColimaError::from)
@@ -36,6 +38,7 @@ pub async fn k8s_current_context() -> Result<String, ColimaError> {
 
 #[tauri::command]
 pub async fn k8s_set_context(context: String) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     async move {
         if context.is_empty() {
             return Err("Context name is empty".to_string());
@@ -50,6 +53,7 @@ pub async fn k8s_set_context(context: String) -> Result<String, ColimaError> {
 
 #[tauri::command]
 pub async fn k8s_nodes_json() -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     run_blocking(|| run_cmd("kubectl", &["get", "nodes", "-o", "json"]))
         .await
         .map_err(ColimaError::from)
@@ -57,6 +61,7 @@ pub async fn k8s_nodes_json() -> Result<String, ColimaError> {
 
 #[tauri::command]
 pub async fn k8s_events_json(namespace: String) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     async move {
         if !namespace.is_empty() && namespace != "all" && !is_valid_k8s_name(&namespace) {
             return Err(format!("Invalid namespace: {namespace}"));
@@ -93,6 +98,7 @@ pub async fn k8s_events_json(namespace: String) -> Result<String, ColimaError> {
 /// unknown value fails here instead of becoming an unintended kubectl verb.
 #[tauri::command]
 pub async fn k8s_node_action(name: String, action: String) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     async move {
         if !is_valid_k8s_name(&name) {
             return Err(format!("Invalid node name: {name}"));
@@ -122,6 +128,7 @@ pub async fn k8s_node_action(name: String, action: String) -> Result<String, Col
 
 #[tauri::command]
 pub async fn k8s_pf_list() -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     run_blocking(|| {
         let fwds = PORT_FORWARDS.lock().map_err(|e| format!("{e}"))?;
         Ok(fwds
@@ -142,6 +149,7 @@ pub async fn k8s_pf_start(
     remote_port: u32,
     resource_type: String,
 ) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     async move {
         if !is_valid_k8s_name(&namespace) {
             return Err(format!("Invalid namespace: {namespace}"));
@@ -183,6 +191,7 @@ pub async fn k8s_pf_start(
 
 #[tauri::command]
 pub async fn k8s_pf_stop(local_port: u32) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     run_blocking(move || {
         if let Ok(mut fwds) = PORT_FORWARDS.lock() {
             if let Some(pid) = fwds.remove(&local_port.to_string()) {
@@ -218,6 +227,7 @@ pub async fn k8s_pf_stop(local_port: u32) -> Result<String, ColimaError> {
 
 #[tauri::command]
 pub async fn k8s_cluster_health() -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     run_blocking(cluster_health_report)
         .await
         .map_err(ColimaError::from)
@@ -230,6 +240,7 @@ pub async fn k8s_benchmark(
     requests: u32,
     method: String,
 ) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     run_benchmark(url, concurrency, requests, method)
         .await
         .map_err(ColimaError::from)
@@ -251,8 +262,8 @@ pub fn cluster_health_report() -> Result<String, String> {
         &["get", "deployments", "--all-namespaces", "-o", "json"],
     )
     .unwrap_or_default();
-    let pvcs_raw = run_cmd("kubectl", &["get", "pvc", "--all-namespaces", "-o", "json"])
-        .unwrap_or_default();
+    let pvcs_raw =
+        run_cmd("kubectl", &["get", "pvc", "--all-namespaces", "-o", "json"]).unwrap_or_default();
     let events_raw = run_cmd(
         "kubectl",
         &[
@@ -499,6 +510,7 @@ pub async fn run_benchmark(
     requests: u32,
     method: String,
 ) -> Result<String, String> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err("URL must start with http:// or https://".to_string());
     }
@@ -623,10 +635,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn benchmark_rejects_non_http_urls() {
+    async fn benchmark_requires_a_supported_host_and_http_url() {
         let e = run_benchmark("file:///etc/passwd".into(), 1, 1, "GET".into())
             .await
             .unwrap_err();
-        assert!(e.contains("http://"), "unexpected error: {e}");
+        if cfg!(windows) {
+            assert!(
+                e.starts_with(
+                    "Kubernetes management is unavailable in the Windows Docker edition."
+                ),
+                "unsupported hosts must refuse before URL validation: {e}"
+            );
+        } else {
+            assert!(e.contains("http://"), "unexpected error: {e}");
+        }
     }
 }

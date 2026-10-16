@@ -9,9 +9,9 @@
 //!
 //! Output is buffered as **bytes**. The previous implementation decoded each
 //! chunk with `from_utf8_lossy`, which corrupts any multi-byte character that
-//! happens to straddle a read boundary. Callers that still want a `String` go
-//! through [`SessionManager::read`], which only hands back whole characters and
-//! keeps the trailing partial sequence for the next call.
+//! happens to straddle a read boundary. The flush thread uses
+//! [`split_on_char_boundary`] to publish whole characters and retains the
+//! trailing partial sequence for its next chunk.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -20,7 +20,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use portable_pty::{CommandBuilder, NativePtySystem, PtyPair, PtySize, PtySystem};
+use portable_pty::PtySize;
+#[cfg(not(windows))]
+use portable_pty::{CommandBuilder, NativePtySystem, PtyPair, PtySystem};
 
 use crate::validation::{ensure_valid_profile, is_valid_k8s_name};
 
@@ -47,15 +49,24 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
 /// Nothing renders at 0×0 and some shells abort on it, so never start there.
 const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_COLS: u16 = 80;
+pub(crate) const MAX_SESSIONS: usize = 16;
 
 type OutputBuffer = Arc<Mutex<Vec<u8>>>;
 
 /// A live pty plus the child attached to it.
 pub struct TerminalSession {
     /// Master side only — see `create` for why the slave is not kept.
+    #[cfg(not(windows))]
     master: Box<dyn portable_pty::MasterPty + Send>,
+    #[cfg(windows)]
+    master: crate::windows_pty::Master,
     writer: Box<dyn Write + Send>,
+    #[cfg(not(windows))]
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    #[cfg(windows)]
+    child: crate::windows_pty::Child,
+    #[cfg(windows)]
+    origin: Option<(Arc<crate::engine_connection::EngineConnection>, u64)>,
     /// Cleared on close so the reader and flush threads unwind.
     running: Arc<AtomicBool>,
     /// Last time bytes moved in either direction. Shared with the flush thread
@@ -65,16 +76,45 @@ pub struct TerminalSession {
     closed: bool,
 }
 
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn trim_output(bytes: &mut Vec<u8>) {
+    let mut start = bytes.len().saturating_sub(BUFFER_TRIM_TO_BYTES);
+    while start < bytes.len() && bytes[start] & 0xc0 == 0x80 {
+        start += 1;
+    }
+    bytes.drain(..start);
+}
+
 /// What a session is attached to.
 ///
 /// All three spawn onto the same pty and share transport, resize, reaping and
 /// the session cap; only the argv differs. Adding a fourth target should mean
 /// adding a variant here, not a parallel code path.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum SessionKind {
-    Colima { profile: String },
-    Lima { instance: String },
+    ContainerExec {
+        container_id: String,
+        #[serde(default)]
+        engine: String,
+    },
+    Colima {
+        profile: String,
+    },
+    Lima {
+        instance: String,
+    },
     K8sExec {
         namespace: String,
         pod: String,
@@ -114,9 +154,35 @@ fn history_preamble(name: &str) -> String {
 /// are testable without opening a pty.
 pub fn build_spawn(kind: &SessionKind, home: &str) -> Result<Spawn, String> {
     match kind {
+        SessionKind::ContainerExec {
+            container_id,
+            engine,
+        } => {
+            if !crate::validation::is_stable_container_id(container_id) {
+                return Err("Invalid container ID format".into());
+            }
+            if !engine.is_empty() {
+                crate::engine_connection::validate_context_name(engine)?;
+            }
+            Ok(Spawn {
+                program: "docker".into(),
+                args: vec![
+                    "exec".into(),
+                    "-it".into(),
+                    container_id.clone(),
+                    "sh".into(),
+                    "-c".into(),
+                    "command -v bash >/dev/null 2>&1 && exec bash -l || exec sh".into(),
+                ],
+            })
+        }
         SessionKind::Colima { profile } | SessionKind::Lima { instance: profile } => {
             ensure_valid_profile(profile)?;
-            let name = if profile.is_empty() { "default" } else { profile };
+            let name = if profile.is_empty() {
+                "default"
+            } else {
+                profile
+            };
 
             let (ssh_config, host) = match kind {
                 SessionKind::Lima { .. } => (
@@ -188,9 +254,7 @@ pub fn build_spawn(kind: &SessionKind, home: &str) -> Result<Spawn, String> {
             args.push("--".to_string());
             args.push("sh".to_string());
             args.push("-c".to_string());
-            args.push(
-                "command -v bash >/dev/null 2>&1 && exec bash -l || exec sh".to_string(),
-            );
+            args.push("command -v bash >/dev/null 2>&1 && exec bash -l || exec sh".to_string());
 
             Ok(Spawn {
                 program: "kubectl".to_string(),
@@ -200,37 +264,52 @@ pub fn build_spawn(kind: &SessionKind, home: &str) -> Result<Spawn, String> {
     }
 }
 
-pub struct SessionManager {
-    sessions: HashMap<String, TerminalSession>,
+/// Validated external preparation owns no PTY and never needs the shared map.
+/// Keep daemon/tool/config probes here; commit performs only local authority
+/// checks and PTY installation while holding the session manager.
+struct PreparedSession {
+    command: std::process::Command,
+    #[cfg(windows)]
+    origin: Option<(Arc<crate::engine_connection::EngineConnection>, u64)>,
 }
 
-impl SessionManager {
-    pub fn new() -> Self {
-        Self {
-            sessions: HashMap::new(),
-        }
-    }
-
-    /// Open a session against a VM or a cluster container.
-    ///
-    /// `on_output` receives decoded text on a background thread, coalesced to
-    /// one call per [`FLUSH_INTERVAL`]. Passing a sink is what replaced the old
-    /// poll-the-buffer-over-HTTP loop.
-    pub fn create(
-        &mut self,
-        session_id: &str,
-        kind: &SessionKind,
-        on_output: Box<dyn Fn(String) + Send + 'static>,
-    ) -> Result<(), String> {
+impl PreparedSession {
+    fn prepare(kind: &SessionKind) -> Result<Self, String> {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         // Validation lives in `build_spawn`, so it cannot be skipped by a caller
         // that builds a command some other way.
         let spawn = build_spawn(kind, &home)?;
-
-        // Idempotent: a remount must not leave the previous pty orphaned.
-        if self.sessions.contains_key(session_id) {
-            let _ = self.close(session_id);
+        #[cfg(windows)]
+        if !matches!(kind, SessionKind::ContainerExec { .. }) {
+            return Err("Windows terminals support Docker containers only".into());
         }
+        let mut command = if let SessionKind::ContainerExec {
+            container_id,
+            engine,
+        } = kind
+        {
+            let (command, current) = container_command(container_id)?;
+            if engine != &current {
+                return Err(
+                    "Terminal target differs from the active engine. Reopen it from Containers."
+                        .into(),
+                );
+            }
+            command
+        } else {
+            std::process::Command::new(crate::path_util::resolve_binary(&spawn.program))
+        };
+        #[cfg(windows)]
+        let origin = if let SessionKind::ContainerExec { engine, .. } = kind {
+            let connection = crate::engine_connection::active()?;
+            if engine.is_empty() || engine != connection.target().context() {
+                return Err("Terminal target differs from the active Docker engine. Reopen it from Containers.".into());
+            }
+            Some((connection.clone(), connection.read_generation()?))
+        } else {
+            None
+        };
+        command.args(&spawn.args).env("TERM", "xterm-256color");
 
         // Fail with something the user can act on rather than letting ssh emit
         // a config-file error into the terminal.
@@ -243,40 +322,139 @@ impl SessionManager {
             }
         }
 
-        let pty = NativePtySystem::default();
-        let pair = pty
-            .openpty(PtySize {
-                rows: DEFAULT_ROWS,
-                cols: DEFAULT_COLS,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| format!("Failed to open pty: {e}"))?;
+        Ok(Self {
+            command,
+            #[cfg(windows)]
+            origin,
+        })
+    }
 
-        // Built as argv, never as a shell string — nothing here is re-parsed by
-        // a shell, so there is no quoting to get wrong.
-        let mut cmd = CommandBuilder::new(&spawn.program);
-        cmd.args(&spawn.args);
-        cmd.env("TERM", "xterm-256color");
+    fn ensure_current(&self) -> Result<(), String> {
+        #[cfg(windows)]
+        if let Some((connection, generation)) = &self.origin {
+            connection.ensure_generation(*generation)?;
+        }
+        Ok(())
+    }
+}
 
-        let PtyPair { master, slave } = pair;
+pub struct SessionManager {
+    sessions: HashMap<String, TerminalSession>,
+    pending: HashMap<String, u64>,
+    next_pending: u64,
+    closing: bool,
+}
 
-        let child = slave
-            .spawn_command(cmd)
-            .map_err(|e| format!("Failed to spawn terminal: {e}"))?;
+impl SessionManager {
+    pub fn new() -> Self {
+        Self {
+            sessions: HashMap::new(),
+            pending: HashMap::new(),
+            next_pending: 0,
+            closing: false,
+        }
+    }
 
-        let mut reader = master
-            .try_clone_reader()
-            .map_err(|e| format!("Failed to read from pty: {e}"))?;
-        let writer = master
-            .take_writer()
-            .map_err(|e| format!("Failed to write to pty: {e}"))?;
+    fn reserve(&mut self, session_id: &str) -> Result<u64, String> {
+        if self.closing {
+            return Err("Application is closing".into());
+        }
+        if self.pending.contains_key(session_id) {
+            return Err("Terminal session is already opening".into());
+        }
+        // Count the union: reconnecting a live id needs no additional slot,
+        // while a slow open cannot allow another caller to oversubscribe.
+        let occupied = self.sessions.len()
+            + self
+                .pending
+                .keys()
+                .filter(|id| !self.sessions.contains_key(*id))
+                .count();
+        check_session_limit(occupied, self.contains(session_id))?;
+        self.next_pending = self
+            .next_pending
+            .checked_add(1)
+            .ok_or("Terminal admission exhausted")?;
+        self.pending
+            .insert(session_id.to_owned(), self.next_pending);
+        Ok(self.next_pending)
+    }
 
-        // Release our handle on the slave the moment the child owns it. A pty
-        // master only reports EOF once *every* slave fd is closed, so holding
-        // this would leave the reader thread blocked forever after the user
-        // types `exit` — one leaked thread and its buffer per abandoned session.
-        drop(slave);
+    fn cancel_reservation(&mut self, session_id: &str, token: u64) {
+        if self.pending.get(session_id) == Some(&token) {
+            self.pending.remove(session_id);
+        }
+    }
+
+    fn commit_prepared(
+        &mut self,
+        session_id: &str,
+        token: u64,
+        prepared: PreparedSession,
+        on_output: Box<dyn Fn(String) + Send + 'static>,
+    ) -> Result<(), String> {
+        if self.closing || self.pending.get(session_id) != Some(&token) {
+            return Err("Terminal opening was cancelled".into());
+        }
+        // No daemon subprocess here: reject obsolete prepared authority using
+        // the connection's current generation before replacing a live session.
+        prepared.ensure_current()?;
+        self.cancel_reservation(session_id, token);
+        if self.sessions.contains_key(session_id) {
+            self.close(session_id)?;
+        }
+        let PreparedSession {
+            command,
+            #[cfg(windows)]
+            origin,
+        } = prepared;
+        #[cfg(not(windows))]
+        let (master, child, mut reader, writer) = {
+            let pair = NativePtySystem::default()
+                .openpty(PtySize {
+                    rows: DEFAULT_ROWS,
+                    cols: DEFAULT_COLS,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|e| format!("Failed to open pty: {e}"))?;
+            let mut cmd = CommandBuilder::new(command.get_program());
+            cmd.args(command.get_args());
+            for (key, value) in command.get_envs() {
+                if let Some(value) = value {
+                    cmd.env(key, value);
+                } else {
+                    cmd.env_remove(key);
+                }
+            }
+            let PtyPair { master, slave } = pair;
+            // Acquire fallible host I/O before the child can exist.
+            let reader = master
+                .try_clone_reader()
+                .map_err(|e| format!("Failed to read pty: {e}"))?;
+            let writer = master
+                .take_writer()
+                .map_err(|e| format!("Failed to write pty: {e}"))?;
+            let child = slave
+                .spawn_command(cmd)
+                .map_err(|e| format!("Failed to spawn terminal: {e}"))?;
+            drop(slave);
+            (master, child, reader, writer)
+        };
+        #[cfg(windows)]
+        let (master, child, mut reader, writer) = {
+            let opened = crate::windows_pty::spawn(
+                command,
+                PtySize {
+                    rows: DEFAULT_ROWS,
+                    cols: DEFAULT_COLS,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+            )
+            .map_err(|e| format!("Failed to open Windows terminal: {e}"))?;
+            (opened.master, opened.child, opened.reader, opened.writer)
+        };
 
         // A pty merges stdout and stderr onto one stream, so one reader thread
         // replaces the two the piped version needed — and the interleaving is
@@ -284,6 +462,8 @@ impl SessionManager {
         let buffer: OutputBuffer = Arc::new(Mutex::new(Vec::new()));
         let running = Arc::new(AtomicBool::new(true));
         let last_activity = Arc::new(Mutex::new(Instant::now()));
+        let trimmed = Arc::new(AtomicBool::new(false));
+        let read_trimmed = trimmed.clone();
 
         let buf_clone = Arc::clone(&buffer);
         thread::spawn(move || {
@@ -295,12 +475,8 @@ impl SessionManager {
                         let mut buf = buf_clone.lock().unwrap();
                         buf.extend_from_slice(&tmp[..n]);
                         if buf.len() > MAX_BUFFER_BYTES {
-                            // Note this cuts at an arbitrary byte, so an escape
-                            // sequence or character can be severed. That is the
-                            // price of bounded memory, and it only happens when
-                            // the producer has already outrun the UI by 1 MB.
-                            let excess = buf.len() - BUFFER_TRIM_TO_BYTES;
-                            buf.drain(..excess);
+                            trim_output(&mut buf);
+                            read_trimmed.store(true, Ordering::Release);
                         }
                     }
                     Err(_) => break,
@@ -316,14 +492,23 @@ impl SessionManager {
         let flush_activity = Arc::clone(&last_activity);
         thread::spawn(move || {
             let mut carry: Vec<u8> = Vec::new();
-            while flush_running.load(Ordering::Relaxed) {
+            loop {
                 thread::sleep(FLUSH_INTERVAL);
 
-                let chunk = {
+                let (chunk, dropped) = {
                     let mut buf = flush_buf.lock().unwrap();
-                    std::mem::take(&mut *buf)
+                    (
+                        std::mem::take(&mut *buf),
+                        trimmed.swap(false, Ordering::AcqRel),
+                    )
                 };
+                if dropped {
+                    carry.clear();
+                }
                 if chunk.is_empty() {
+                    if !flush_running.load(Ordering::Relaxed) {
+                        break;
+                    }
                     continue;
                 }
 
@@ -338,6 +523,9 @@ impl SessionManager {
                     }
                     on_output(text);
                 }
+                if !flush_running.load(Ordering::Relaxed) {
+                    break;
+                }
             }
         });
 
@@ -347,6 +535,8 @@ impl SessionManager {
                 master,
                 writer,
                 child,
+                #[cfg(windows)]
+                origin,
                 running,
                 last_activity,
                 closed: false,
@@ -365,6 +555,14 @@ impl SessionManager {
 
         if session.closed {
             return Err("Session is closed".to_string());
+        }
+        #[cfg(windows)]
+        if let Some((connection, generation)) = &session.origin {
+            if let Err(error) = connection.ensure_generation(*generation) {
+                session.running.store(false, Ordering::Relaxed);
+                let _ = session.child.kill();
+                return Err(error);
+            }
         }
 
         session
@@ -392,11 +590,7 @@ impl SessionManager {
         let stale: Vec<String> = self
             .sessions
             .iter()
-            .filter(|(_, s)| {
-                s.last_activity
-                    .lock()
-                    .is_ok_and(|a| a.elapsed() > max_idle)
-            })
+            .filter(|(_, s)| s.last_activity.lock().is_ok_and(|a| a.elapsed() > max_idle))
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -442,13 +636,20 @@ impl SessionManager {
         if session.closed {
             return None;
         }
-        match session.child.try_wait() {
-            Ok(Some(status)) => {
-                session.closed = true;
-                Some(status.exit_code())
-            }
-            _ => None,
+        #[cfg(windows)]
+        if session
+            .origin
+            .as_ref()
+            .is_some_and(|(connection, generation)| {
+                connection.ensure_generation(*generation).is_err()
+            })
+        {
+            let _ = session.child.kill();
         }
+        let status = session.child.try_wait().ok().flatten()?;
+        let code = status.exit_code();
+        let _ = self.close(session_id);
+        Some(code)
     }
 
     /// Kill the session and reap it.
@@ -459,18 +660,19 @@ impl SessionManager {
     /// closes the pty, which lets the reader thread see EOF and exit; clearing
     /// `running` unwinds the flush thread on its next tick.
     pub fn close(&mut self, session_id: &str) -> Result<(), String> {
+        self.pending.remove(session_id);
         if let Some(mut session) = self.sessions.remove(session_id) {
             session.running.store(false, Ordering::Relaxed);
             let _ = session.child.kill();
             let _ = session.child.wait();
-            drop(session.writer);
-            drop(session.master);
         }
         Ok(())
     }
 
     /// Close every session. Called on app exit so no pty outlives the window.
     pub fn close_all(&mut self) {
+        self.closing = true;
+        self.pending.clear();
         let ids: Vec<String> = self.sessions.keys().cloned().collect();
         for id in ids {
             let _ = self.close(&id);
@@ -490,6 +692,54 @@ impl SessionManager {
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
     }
+}
+
+pub(crate) fn check_session_limit(count: usize, reconnect: bool) -> Result<(), String> {
+    if !reconnect && count >= MAX_SESSIONS {
+        Err(format!(
+            "Too many terminal sessions open ({MAX_SESSIONS}). Close one first."
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Resolve readiness and origin at the resource boundary. No host shell or
+/// automatic start is a recovery path for an absent/stopped/shell-less image.
+pub(crate) fn container_command(id: &str) -> Result<(std::process::Command, String), String> {
+    if !crate::validation::is_stable_container_id(id) {
+        return Err("Invalid container ID format".into());
+    }
+    let mut command = crate::commands::runtime::get_runtime_cmd()?;
+    #[cfg(windows)]
+    let engine = crate::engine_connection::active()?
+        .target()
+        .context()
+        .to_string();
+    #[cfg(not(windows))]
+    let engine = crate::commands::runtime::detect_runtime().1;
+    command.args(["container", "inspect", "--format", "{{json .}}", id]);
+    let output = crate::child_process::capture(command, Duration::from_secs(5), 1024 * 1024)
+        .map_err(|e| format!("{engine}: cannot inspect terminal container: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{engine}: {}",
+            crate::redact::redact(&String::from_utf8_lossy(&output.stderr))
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "Invalid terminal container response")?;
+    if !value["Id"]
+        .as_str()
+        .is_some_and(|full| full.starts_with(id))
+        || value["State"]["Running"].as_bool() != Some(true)
+        || value["State"]["Paused"].as_bool() != Some(false)
+    {
+        return Err(format!(
+            "{engine}: container is stopped, paused or no longer matches. Open it in Containers."
+        ));
+    }
+    Ok((crate::commands::runtime::get_runtime_cmd()?, engine))
 }
 
 impl Default for SessionManager {
@@ -545,6 +795,67 @@ fn split_on_char_boundary(data: Vec<u8>) -> (String, Vec<u8>) {
 
 pub type SharedSessionManager = Arc<Mutex<SessionManager>>;
 
+/// Production IPC acquisition: reserve briefly, prepare on a blocking worker
+/// without the global map, then commit only the still-current reservation.
+pub async fn create_shared_session(
+    manager: SharedSessionManager,
+    session_id: String,
+    kind: SessionKind,
+    on_output: Box<dyn Fn(String) + Send + 'static>,
+) -> Result<(), String> {
+    create_prepared_session(
+        manager,
+        session_id,
+        move || PreparedSession::prepare(&kind),
+        on_output,
+    )
+    .await
+}
+
+struct SessionReservation {
+    manager: SharedSessionManager,
+    id: String,
+    token: u64,
+}
+impl Drop for SessionReservation {
+    fn drop(&mut self) {
+        if let Ok(mut manager) = self.manager.lock() {
+            manager.cancel_reservation(&self.id, self.token);
+        }
+    }
+}
+
+async fn create_prepared_session<F>(
+    manager: SharedSessionManager,
+    id: String,
+    prepare: F,
+    on_output: Box<dyn Fn(String) + Send + 'static>,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Result<PreparedSession, String> + Send + 'static,
+{
+    let token = manager
+        .lock()
+        .map_err(|_| "Terminal manager unavailable")?
+        .reserve(&id)?;
+    let reservation = SessionReservation { manager, id, token };
+    tokio::task::spawn_blocking(move || {
+        let prepared = prepare()?;
+        // The guard is dropped before the reservation's RAII cleanup, including
+        // failed preparation/commit and a worker panic. Close cancels tokens.
+        let mut manager = reservation
+            .manager
+            .lock()
+            .map_err(|_| "Terminal manager unavailable")?;
+        let outcome =
+            manager.commit_prepared(&reservation.id, reservation.token, prepared, on_output);
+        drop(manager);
+        outcome
+    })
+    .await
+    .map_err(|error| format!("Terminal task failed: {error}"))?
+}
+
 /// Sessions with no traffic for this long are closed.
 ///
 /// Generous on purpose: output counts as activity, so this only fires on a
@@ -574,6 +885,412 @@ mod tests {
     use super::*;
 
     const HOME: &str = "/home/tester";
+
+    // TestSpec=TC-WINUI-013: partial stream-text guard only, not installed IME,
+    // terminal navigation, origin, cap or native ConPTY qualification.
+    #[test]
+    fn valid_utf8_round_trips_across_every_two_chunk_cut() {
+        // OS reads can divide a character at any byte. Exhaust every pair of
+        // cuts (including empty chunks) without a random generator or sleeps.
+        for text in ["", "ASCII", "aé界🦀z", "e\u{301}\r\n日本語\u{3}"] {
+            let bytes = text.as_bytes();
+            for first in 0..=bytes.len() {
+                for second in first..=bytes.len() {
+                    let mut output = String::new();
+                    let mut carry = Vec::new();
+                    for chunk in [&bytes[..first], &bytes[first..second], &bytes[second..]] {
+                        carry.extend_from_slice(chunk);
+                        let (decoded, remainder) = split_on_char_boundary(carry);
+                        output.push_str(&decoded);
+                        carry = remainder;
+                        assert!(carry.len() <= 3, "unbounded carry at {first}/{second}");
+                    }
+                    assert_eq!(output, text, "text changed at {first}/{second}");
+                    assert!(carry.is_empty(), "valid completed text left a carried tail");
+                }
+            }
+        }
+    }
+
+    // TC-WINUI-013/033: target data stays literal; no ID can become a host command.
+    // TestSpec=TC-WINUI-013; TestSpec=TC-WINUI-033 — partial shared-owner contract.
+    // TC013/033: a real owned PTY, not a host shell or personal Docker engine.
+    #[test]
+    fn terminal_fixture_child() {
+        if std::env::var_os("COLIMAUI_TERMINAL_FIXTURE").is_none() {
+            return;
+        }
+        use std::io::BufRead;
+        println!("CUI-fixture-ready");
+        std::io::stdout().flush().unwrap();
+        for line in std::io::stdin().lock().lines() {
+            match line.unwrap().as_str() {
+                "fixture-input" => {
+                    println!("CUI-child-accepted");
+                    std::io::stdout().flush().unwrap();
+                }
+                "exit" => break,
+                _ => {}
+            }
+        }
+    }
+
+    fn prepared_fixture() -> PreparedSession {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "terminal_session::tests::terminal_fixture_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("COLIMAUI_TERMINAL_FIXTURE", "1");
+        PreparedSession {
+            command,
+            #[cfg(windows)]
+            origin: None,
+        }
+    }
+
+    fn fixture_session(
+        manager: &mut SessionManager,
+        id: &str,
+    ) -> std::sync::mpsc::Receiver<String> {
+        let (sent, output) = std::sync::mpsc::channel();
+        let token = manager.reserve(id).unwrap();
+        manager
+            .commit_prepared(
+                id,
+                token,
+                prepared_fixture(),
+                Box::new(move |text| {
+                    let _ = sent.send(text);
+                }),
+            )
+            .unwrap();
+        output
+    }
+
+    fn expect_output(output: &std::sync::mpsc::Receiver<String>, marker: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut text = String::new();
+        while !text.contains(marker) {
+            text.push_str(
+                &output
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .expect("owned PTY did not acknowledge input"),
+            );
+        }
+    }
+
+    struct HeldOpen {
+        release: Option<std::sync::mpsc::Sender<()>>,
+        worker: Option<std::thread::JoinHandle<Result<(), String>>>,
+    }
+    impl HeldOpen {
+        fn finish(mut self) -> Result<(), String> {
+            self.release.take().unwrap().send(()).unwrap();
+            self.worker.take().unwrap().join().unwrap()
+        }
+    }
+    impl Drop for HeldOpen {
+        fn drop(&mut self) {
+            // Release even on an assertion panic: a defective long lock or
+            // current-thread-runtime stall produces a failed assertion, never
+            // an unrecoverable test deadlock or runner-timeout "kill".
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    fn held_open(
+        manager: SharedSessionManager,
+        id: &str,
+        fail: bool,
+    ) -> (
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Receiver<()>,
+        HeldOpen,
+    ) {
+        let (entered, started) = std::sync::mpsc::channel();
+        let (heartbeat, progress) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let id = id.to_owned();
+        let worker = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    let (signal, observed) = tokio::sync::oneshot::channel();
+                    let opening = tokio::spawn(create_prepared_session(
+                        manager,
+                        id,
+                        move || {
+                            entered.send(()).unwrap();
+                            let _ = signal.send(());
+                            held.recv().unwrap();
+                            if fail {
+                                Err("fixture preflight rejected".into())
+                            } else {
+                                Ok(prepared_fixture())
+                            }
+                        },
+                        Box::new(|_| {}),
+                    ));
+                    observed.await.unwrap();
+                    heartbeat.send(()).unwrap();
+                    opening.await.unwrap()
+                })
+        });
+        (
+            started,
+            progress,
+            HeldOpen {
+                release: Some(release),
+                worker: Some(worker),
+            },
+        )
+    }
+
+    #[test]
+    fn slow_open_keeps_shared_controls_and_async_runtime_responsive() {
+        for fail in [false, true] {
+            let manager = Arc::new(Mutex::new(SessionManager::new()));
+            let output = fixture_session(&mut manager.lock().unwrap(), "A");
+            expect_output(&output, "CUI-fixture-ready");
+            let (started, heartbeat, opening) = held_open(manager.clone(), "B", fail);
+            started
+                .recv_timeout(Duration::from_secs(5))
+                .expect("prepare must start");
+            heartbeat
+                .recv_timeout(Duration::from_secs(2))
+                .expect("async worker must progress while preparation is held");
+            {
+                let mut live = manager
+                    .try_lock()
+                    .expect("external preparation must not hold the shared manager");
+                live.write("A", "fixture-input\n").unwrap();
+                live.resize("A", 32, 100).unwrap();
+                assert_eq!(live.poll_exit("A"), None);
+            }
+            expect_output(&output, "CUI-child-accepted");
+            manager
+                .try_lock()
+                .expect("Close must remain available")
+                .close("A")
+                .unwrap();
+            assert!(!manager.lock().unwrap().contains("A"));
+            let result = opening.finish();
+            assert_eq!(result.is_err(), fail);
+            let mut live = manager.lock().unwrap();
+            assert!(
+                live.pending.is_empty(),
+                "success and failure release admission"
+            );
+            assert_eq!(live.contains("B"), !fail);
+            live.close_all();
+            assert!(live.is_empty());
+        }
+    }
+
+    #[test]
+    fn close_and_shutdown_cancel_held_open_without_late_pty_or_output() {
+        for shutdown in [false, true] {
+            let manager = Arc::new(Mutex::new(SessionManager::new()));
+            let (started, heartbeat, opening) = held_open(manager.clone(), "pending", false);
+            started.recv_timeout(Duration::from_secs(5)).unwrap();
+            heartbeat.recv_timeout(Duration::from_secs(2)).unwrap();
+            {
+                let mut live = manager.try_lock().expect("close cannot wait for preflight");
+                if shutdown {
+                    live.close_all();
+                } else {
+                    live.close("pending").unwrap();
+                }
+                assert!(live.pending.is_empty());
+            }
+            assert_eq!(
+                opening.finish().unwrap_err(),
+                "Terminal opening was cancelled"
+            );
+            let mut live = manager.lock().unwrap();
+            assert!(live.is_empty());
+            if shutdown {
+                assert!(live.reserve("late").is_err());
+            } else {
+                live.reserve("late").unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn pending_capacity_duplicate_and_reconnect_share_one_admission_owner() {
+        let mut manager = SessionManager::new();
+        let _output = fixture_session(&mut manager, "live");
+        for index in 0..15 {
+            manager.reserve(&format!("pending-{index}")).unwrap();
+        }
+        assert!(manager.reserve("overflow").is_err());
+        assert!(manager
+            .reserve("pending-0")
+            .unwrap_err()
+            .contains("already opening"));
+        let old = manager
+            .reserve("live")
+            .expect("live reconnect fits at cap16");
+        assert!(
+            manager.reserve("live").is_err(),
+            "one in-flight prepare per id"
+        );
+        manager.close("live").unwrap();
+        let new = manager.reserve("live").unwrap();
+        assert_ne!(old, new);
+        assert_eq!(
+            manager
+                .commit_prepared("live", old, prepared_fixture(), Box::new(|_| {}))
+                .unwrap_err(),
+            "Terminal opening was cancelled"
+        );
+        manager.cancel_reservation("live", old);
+        assert_eq!(
+            manager.pending.get("live"),
+            Some(&new),
+            "old cleanup cannot cancel a new open"
+        );
+        manager
+            .commit_prepared("live", new, prepared_fixture(), Box::new(|_| {}))
+            .unwrap();
+        manager.close_all();
+        assert!(manager.pending.is_empty());
+        assert!(manager.is_empty());
+    }
+
+    #[test]
+    fn failed_reconnect_keeps_the_existing_session_and_releases_pending_slot() {
+        let manager = Arc::new(Mutex::new(SessionManager::new()));
+        let output = fixture_session(&mut manager.lock().unwrap(), "live");
+        expect_output(&output, "CUI-fixture-ready");
+        let (started, heartbeat, opening) = held_open(manager.clone(), "live", true);
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        heartbeat.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(manager.lock().unwrap().contains("live"));
+        assert!(opening.finish().is_err());
+        let mut live = manager.lock().unwrap();
+        assert!(live.pending.is_empty());
+        live.write("live", "fixture-input\n").unwrap();
+        drop(live);
+        expect_output(&output, "CUI-child-accepted");
+        manager.lock().unwrap().close_all();
+    }
+
+    #[tokio::test]
+    async fn panicked_preparation_releases_admission_without_acquiring_a_session() {
+        let manager = Arc::new(Mutex::new(SessionManager::new()));
+        let result = create_prepared_session(
+            manager.clone(),
+            "panic-fixture".into(),
+            || panic!("controlled preparation panic"),
+            Box::new(|_| {}),
+        )
+        .await;
+        assert!(result.unwrap_err().contains("Terminal task failed"));
+        let mut live = manager.lock().unwrap();
+        assert!(live.pending.is_empty());
+        assert!(live.is_empty());
+        live.reserve("panic-fixture").unwrap();
+        live.close_all();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn prepared_origin_must_still_match_before_replacing_a_live_session() {
+        let connection = crate::engine_connection::EngineConnection::identity_fixture();
+        let generation = connection.read_generation().unwrap();
+        let mut manager = SessionManager::new();
+        let _output = fixture_session(&mut manager, "live");
+        let token = manager.reserve("live").unwrap();
+        let mut stale = prepared_fixture();
+        stale.origin = Some((connection.clone(), generation + 1));
+        assert!(manager
+            .commit_prepared("live", token, stale, Box::new(|_| {}))
+            .unwrap_err()
+            .contains("availability changed"));
+        assert!(
+            manager.contains("live"),
+            "obsolete preparation cannot close the existing session"
+        );
+        manager.cancel_reservation("live", token);
+        let token = manager.reserve("live").unwrap();
+        let mut current = prepared_fixture();
+        current.origin = Some((connection, generation));
+        manager
+            .commit_prepared("live", token, current, Box::new(|_| {}))
+            .unwrap();
+        manager.close_all();
+    }
+
+    #[test]
+    fn container_terminal_keeps_identity_as_one_literal_argument() {
+        let kind = SessionKind::ContainerExec {
+            container_id: "a".repeat(64),
+            engine: "desktop-linux".into(),
+        };
+        let spawn = build_spawn(&kind, HOME).unwrap();
+        assert_eq!(&spawn.args[..4], &["exec", "-it", &"a".repeat(64), "sh"]);
+        let value = serde_json::to_value(&kind).unwrap();
+        assert_eq!(value["kind"], "containerExec");
+        assert_eq!(value["containerId"], "a".repeat(64));
+        for id in ["--privileged", "a;whoami", "abc def", "../file", ""] {
+            assert!(build_spawn(
+                &SessionKind::ContainerExec {
+                    container_id: id.into(),
+                    engine: "desktop-linux".into()
+                },
+                HOME
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn terminal_session_cap_refuses_growth_but_allows_existing_id_reconnect() {
+        for count in [0, 15] {
+            check_session_limit(count, false).unwrap();
+        }
+        for count in [16, 17] {
+            assert!(check_session_limit(count, false).is_err());
+            check_session_limit(count, true).unwrap();
+        }
+    }
+
+    #[test]
+    fn output_limit_keeps_a_recent_whole_utf8_window() {
+        for length in [
+            MAX_BUFFER_BYTES - 1,
+            MAX_BUFFER_BYTES,
+            MAX_BUFFER_BYTES + 1,
+            2 * MAX_BUFFER_BYTES,
+        ] {
+            for text in ["é", "界", "🦀"] {
+                let mut bytes = text.repeat(length.div_ceil(text.len())).into_bytes();
+                let original = bytes.clone();
+                if bytes.len() > MAX_BUFFER_BYTES {
+                    trim_output(&mut bytes);
+                }
+                assert!(bytes.len() <= MAX_BUFFER_BYTES);
+                if original.len() > MAX_BUFFER_BYTES {
+                    assert!(bytes.len() <= BUFFER_TRIM_TO_BYTES);
+                }
+                assert!(std::str::from_utf8(&bytes).is_ok());
+                assert!(original.ends_with(&bytes));
+            }
+        }
+    }
 
     #[test]
     fn rejects_hostile_profile_names() {
@@ -679,14 +1396,29 @@ mod tests {
         )
         .unwrap();
 
-        assert!(colima.args.iter().any(|a| a.contains(".colima/_lima/colima/")));
+        assert!(colima
+            .args
+            .iter()
+            .any(|a| a.contains(".colima/_lima/colima/")));
         assert!(lima.args.iter().any(|a| a.contains(".lima/ubuntu/")));
     }
 
     #[test]
     fn history_file_is_per_profile() {
-        let a = build_spawn(&SessionKind::Colima { profile: "a".into() }, HOME).unwrap();
-        let b = build_spawn(&SessionKind::Colima { profile: "b".into() }, HOME).unwrap();
+        let a = build_spawn(
+            &SessionKind::Colima {
+                profile: "a".into(),
+            },
+            HOME,
+        )
+        .unwrap();
+        let b = build_spawn(
+            &SessionKind::Colima {
+                profile: "b".into(),
+            },
+            HOME,
+        )
+        .unwrap();
 
         let hist = |s: &Spawn| s.args.last().unwrap().clone();
         assert!(hist(&a).contains("history-a"));
@@ -749,7 +1481,13 @@ mod tests {
     fn empty_profile_means_default_not_rejected() {
         // Empty is "the default VM" everywhere else in the codebase, so it must
         // resolve rather than error.
-        let spawn = build_spawn(&SessionKind::Colima { profile: String::new() }, HOME).unwrap();
+        let spawn = build_spawn(
+            &SessionKind::Colima {
+                profile: String::new(),
+            },
+            HOME,
+        )
+        .unwrap();
         assert!(spawn.args.iter().any(|a| a.contains("_lima/colima/")));
     }
 

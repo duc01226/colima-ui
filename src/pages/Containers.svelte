@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { dockerApi, sysMethods, type DockerContainer } from "../lib/api";
   import { globalToast } from "../lib/globalToast";
   import { reportError } from "../lib/errorReporter";
@@ -7,19 +7,26 @@
   import * as Icons from "../components/Icons.svelte";
   import { viewInTopology, consumeFocus } from "../lib/topology-link";
 
-  import { dockerState } from "../store.svelte";
+  import { dockerState, uiState, openTerminalSession } from "../store.svelte";
+  import { containerTerminalTarget } from "../lib/terminal-transport";
+  import { isRunningInTauri } from "../lib/env";
+  import RowActions from "../components/RowActions.svelte";
   import { getCurrentPresetForInstance, getContainerPresetMap, PRESET_LABELS, PRESET_COLORS } from "../lib/presetStateManager";
   import { setEventCooldown } from "../store.svelte";
-  import { blockingCapability, capabilityNotice } from "../store/capabilities.svelte";
+  import { blockingCapability, capabilityNotice, isDockerOnlyHost } from "../store/capabilities.svelte";
+  import { refetchAllResources } from "../lib/dataPoller";
   import { groupContainersByProject, type ContainerGroup } from "../lib/composeGrouping";
   import { withErrorReport } from "../lib/errorReporter";
   import { normalizeError, errorMessage } from "../lib/errors";
   import { columnResize } from "../lib/columnResize";
   import TransferDialog from "../components/transfer/TransferDialog.svelte";
-  import ContextMenu from "../components/ContextMenu.svelte";
   import type { TransferMode } from "../lib/api/transfer";
   import { getAppSetting, setAppSetting } from "../lib/settingsStore.svelte";
   import { setVisibleInterval } from "../lib/visibleInterval";
+  import { recoveryDraft } from "../lib/recoveryDrafts.svelte";
+
+  let mounted = true;
+  onDestroy(() => { mounted = false; });
 
   let filter = $state<"all" | "running" | "stopped">("all");
   const containerFilters: ("all" | "running" | "stopped")[] = ["all", "running", "stopped"];
@@ -31,11 +38,12 @@
   let rowErrors = $state<Record<string, string>>({});
   /** Overflow menu for a row: secondary and destructive actions live here so the
       inline cluster stays down to the lifecycle controls people reach for. */
-  let rowMenu = $state<{ x: number; y: number; container: DockerContainer } | null>(null);
 
   function rowMenuItems(c: DockerContainer) {
     const busy = !!actionLoading?.startsWith(c.Id);
     return [
+      { label: t('terminal.open_container', { default: 'Open terminal' }), icon: Icons.Terminal,
+        disabled: busy || c.State !== 'running' || !isRunningInTauri(), action: () => openContainerTerminal(c) },
       {
         label: t('containers.copy_in', { default: 'Copy file into container' }),
         icon: Icons.CopyIn,
@@ -64,10 +72,17 @@
     ];
   }
 
-  function openRowMenu(e: MouseEvent, c: DockerContainer) {
-    e.stopPropagation();
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    rowMenu = { x: rect.right, y: rect.bottom + 4, container: c };
+  async function openContainerTerminal(c: DockerContainer) {
+    actionLoading = `${c.Id}-terminal`;
+    try {
+      const target = await containerTerminalTarget(c.Id, c.Names);
+      if (!mounted) return;
+      selectedContainer = null;
+      openTerminalSession(target);
+    } catch (error) {
+      setRowError(c.Id, error);
+      reportError(error, { action: t('terminal.open_container', { default: 'Open terminal' }) });
+    } finally { actionLoading = null; }
   }
 
   function setRowError(id: string, e: unknown) {
@@ -92,6 +107,7 @@
   let activePreset = getCurrentPresetForInstance("default");
 
   async function refreshContainers() {
+    if (isDockerOnlyHost()) return refetchAllResources();
     try {
       const list = await dockerApi.listContainers(true);
       dockerState.containers = list;
@@ -104,22 +120,29 @@
     getContainerPresetMap("default").then((map) => presetMap = map).catch(() => {});
   });
 
+  let selectionFilterInitialized = false;
   $effect(() => {
     // Clear selection on filter change
-    if (filter || searchTerm) {
-      selected = new Set();
-    }
+    void filter; void searchTerm;
+    if (selectionFilterInitialized) selected = new Set();
+    selectionFilterInitialized = true;
   });
 
   onMount(() => {
     refreshContainers().then(() => {
+      if (!mounted) return;
       // Arrived from the topology graph's "Open in Containers": open the same
       // container's detail panel rather than dropping the user at a list they
       // then have to search. A container that has since gone is ignored.
       const focus = consumeFocus("containers");
-      if (!focus) return;
-      const match = dockerState.containers.find((c) => c.Id === focus || c.Id.startsWith(focus));
+      const match = focus ? dockerState.containers.find((c) => c.Id === focus || c.Id.startsWith(focus)) : undefined;
       if (match) selectedContainer = match;
+      const logs = uiState.pendingContainerLogs;
+      uiState.pendingContainerLogs = null;
+      if (logs) {
+        const target = dockerState.containers.find((c) => c.Id === logs.containerId);
+        if (target) { selectedContainer = target; detailTab = 'logs'; }
+      }
     });
     sysMethods.getRuntimeInfo().then(r => runtimeName = r).catch(() => {});
 
@@ -478,6 +501,26 @@
     }
   }
 
+  recoveryDraft("container-input", () => ({
+    searchTerm, filter, showRunModal, runImage, runName, runPorts, runEnv, runVols, runDetach, runRemove,
+    transfer,
+    selected: [...selected],
+    detail: selectedContainer ? { id: selectedContainer.Id, tab: detailTab, command: detailExecCmd, logLines: detailLogLines, autoScroll: detailAutoScroll } : null,
+  }), (draft) => {
+    ({ searchTerm, filter, showRunModal, runImage, runName, runPorts, runEnv, runVols, runDetach, runRemove } = draft);
+    // Bind resource-specific input only to the freshly admitted resource list;
+    // no old container object, result, pending action or callback is restored.
+    if (draft.transfer && dockerState.containers.some((c) => c.Id === draft.transfer?.containerId)) transfer = draft.transfer;
+    selected = new Set(draft.selected.filter((id) => dockerState.containers.some((c) => c.Id === id)));
+    if (draft.detail) {
+      const target = dockerState.containers.find((c) => c.Id === draft.detail?.id);
+      if (target) {
+        selectedContainer = target; detailTab = draft.detail.tab; detailExecCmd = draft.detail.command;
+        detailLogLines = draft.detail.logLines; detailAutoScroll = draft.detail.autoScroll;
+      }
+    }
+  });
+
 </script>
 
 <div class="content-header" data-tauri-drag-region>
@@ -619,19 +662,14 @@
             </div>
             <div class="vtable-cell" style="font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-muted);" title={c.Ports || ""}>{c.Ports || "—"}</div>
             <div role="button" tabindex="0" class="vtable-cell" onkeydown={(e) => e.key === 'Enter' && e.currentTarget.click()} onclick={(e) => e.stopPropagation()}>
-              <div class="table-actions" style="justify-content: flex-end;">
-                <!-- One lifecycle button reflecting the state the row is actually
-                     in, so the primary move is never ambiguous. -->
-                {#if isPaused}
-                  <button class="btn btn-ghost btn-icon btn-play" data-tooltip={t('containers.unpause', { default: 'Unpause' })} aria-label={t('containers.unpause', { default: 'Unpause' })} disabled={!!isLoading} onclick={() => handleAction(c.Id, c.Names, 'unpause')}>{@html Icons.Play}</button>
-                {:else if isRunning}
-                  <button class="btn btn-ghost btn-icon btn-stop" data-tooltip={t('containers.stop', { default: 'Stop' })} aria-label={t('containers.stop', { default: 'Stop' })} disabled={!!isLoading} onclick={() => handleAction(c.Id, c.Names, 'stop')}>{@html Icons.Stop}</button>
-                {:else}
-                  <button class="btn btn-ghost btn-icon btn-play" data-tooltip={t('containers.start', { default: 'Start' })} aria-label={t('containers.start', { default: 'Start' })} disabled={!!isLoading} onclick={() => handleAction(c.Id, c.Names, 'start')}>{@html Icons.Play}</button>
-                {/if}
-                <button class="btn btn-ghost btn-icon" data-tooltip={t('containers.restart', { default: 'Restart' })} disabled={!!isLoading} onclick={() => handleAction(c.Id, c.Names, 'restart')}>{@html Icons.Refresh}</button>
-                <button class="btn btn-ghost btn-icon" data-tooltip={t('common.more_actions', { default: 'More actions' })} aria-haspopup="menu" onclick={(e) => openRowMenu(e, c)}>{@html Icons.More}</button>
-              </div>
+              <RowActions inline={[
+                { icon: isRunning && !isPaused ? Icons.Stop : Icons.Play,
+                  label: isPaused ? t('containers.unpause', { default: 'Unpause' }) : isRunning ? t('containers.stop', { default: 'Stop' }) : t('containers.start', { default: 'Start' }),
+                  tone: isRunning && !isPaused ? 'danger' : 'success', disabled: !!isLoading,
+                  onclick: () => handleAction(c.Id, c.Names, isPaused ? 'unpause' : isRunning ? 'stop' : 'start') },
+                { icon: Icons.Refresh, label: t('containers.restart', { default: 'Restart' }), disabled: !!isLoading,
+                  onclick: () => handleAction(c.Id, c.Names, 'restart') }
+              ]} menu={rowMenuItems(c)} />
             </div>
           </div>
         {/each}
@@ -760,6 +798,7 @@
         {/if}
       {:else if detailTab === "exec"}
         {#if isRunning}
+          <button class="btn btn-ghost" disabled={!!actionLoading || !isRunningInTauri()} onclick={() => selectedContainer && openContainerTerminal(selectedContainer)}>{t('terminal.open_container', { default: 'Open terminal' })}</button>
           <div bind:this={execRef} style="background: var(--bg-primary); border-radius: 8px; padding: 12px; max-height: 40vh; overflow: auto; margin-bottom: 12px; min-height: 120px;">
             {#if detailExecOutput.length === 0}
               <div style="color: var(--text-muted); font-size: var(--text-sm);">Run commands inside '{selectedContainer.Names}'. Output will appear here.</div>
@@ -812,26 +851,9 @@
   />
 {/if}
 
-{#if rowMenu}
-  <ContextMenu
-    x={rowMenu.x}
-    y={rowMenu.y}
-    items={rowMenuItems(rowMenu.container)}
-    onClose={() => (rowMenu = null)}
-  />
-{/if}
+
 
 <style>
-  /* Lifecycle buttons carry the state colour used by the row status dot, so the
-     icon shape and the colour agree on what the action will do. */
-  .btn-play {
-    color: var(--status-running);
-  }
-
-  .btn-stop {
-    color: var(--accent-yellow);
-  }
-
   /* Group header sits in the same virtual table as the rows, so it inherits the
      row chrome and only overrides what makes it a header. */
   .row-error-badge {

@@ -18,7 +18,11 @@ pub struct AiModel {
 
 /// List available AI models
 #[tauri::command]
-pub async fn list_models(profile: String, runner: Option<String>) -> Result<Vec<AiModel>, crate::error::ColimaError> {
+pub async fn list_models(
+    profile: String,
+    runner: Option<String>,
+) -> Result<Vec<AiModel>, crate::error::ColimaError> {
+    crate::host_features::HostFeature::ManagedVms.require()?;
     async move {
     let mut args = vec!["model", "list"];
     let profile_flag;
@@ -89,112 +93,131 @@ pub async fn list_models(profile: String, runner: Option<String>) -> Result<Vec<
 
 /// Pull/download a model
 #[tauri::command]
-pub async fn pull_model(profile: String, model_name: String, runner: Option<String>) -> Result<String, crate::error::ColimaError> {
+pub async fn pull_model(
+    profile: String,
+    model_name: String,
+    runner: Option<String>,
+) -> Result<String, crate::error::ColimaError> {
+    crate::host_features::HostFeature::ManagedVms.require()?;
     async move {
-    let mut args = vec!["model", "pull", model_name.as_str()];
-    let profile_flag;
-    if profile != "default" && !profile.is_empty() {
-        profile_flag = profile.clone();
-        args.push("--profile");
-        args.push(&profile_flag);
-    }
-    let runner_val;
-    if let Some(ref r) = runner {
-        if !r.is_empty() {
-            runner_val = r.clone();
-            args.push("--runner");
-            args.push(&runner_val);
+        let mut args = vec!["model", "pull", model_name.as_str()];
+        let profile_flag;
+        if profile != "default" && !profile.is_empty() {
+            profile_flag = profile.clone();
+            args.push("--profile");
+            args.push(&profile_flag);
         }
-    }
+        let runner_val;
+        if let Some(ref r) = runner {
+            if !r.is_empty() {
+                runner_val = r.clone();
+                args.push("--runner");
+                args.push(&runner_val);
+            }
+        }
 
-    let output = Command::new("colima")
-        .args(&args)
-        .output()
-        .map_err(|e| format!("Failed to pull model: {}", e))?;
+        let output = Command::new("colima")
+            .args(&args)
+            .output()
+            .map_err(|e| format!("Failed to pull model: {}", e))?;
 
-    if !output.status.success() {
-        return Err(format!(
-            "model pull failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
+        if !output.status.success() {
+            return Err(format!(
+                "model pull failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
 
-    Ok(format!("Model '{}' pulled successfully", model_name))
+        Ok(format!("Model '{}' pulled successfully", model_name))
     }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 /// Serve a model
 #[tauri::command]
-pub async fn serve_model(profile: String, model_name: String, port: u16, runner: Option<String>) -> Result<String, crate::error::ColimaError> {
+pub async fn serve_model(
+    profile: String,
+    model_name: String,
+    port: u16,
+    runner: Option<String>,
+) -> Result<String, crate::error::ColimaError> {
+    crate::host_features::HostFeature::ManagedVms.require()?;
     async move {
-    let port_str = port.to_string();
-    let mut args = vec!["model", "serve", model_name.as_str(), "--port", &port_str];
-    let profile_flag;
-    if profile != "default" && !profile.is_empty() {
-        profile_flag = profile.clone();
-        args.push("--profile");
-        args.push(&profile_flag);
-    }
-    let runner_val;
-    if let Some(ref r) = runner {
-        if !r.is_empty() {
-            runner_val = r.clone();
-            args.push("--runner");
-            args.push(&runner_val);
+        let port_str = port.to_string();
+        let mut args = vec!["model", "serve", model_name.as_str(), "--port", &port_str];
+        let profile_flag;
+        if profile != "default" && !profile.is_empty() {
+            profile_flag = profile.clone();
+            args.push("--profile");
+            args.push(&profile_flag);
         }
-    }
+        let runner_val;
+        if let Some(ref r) = runner {
+            if !r.is_empty() {
+                runner_val = r.clone();
+                args.push("--runner");
+                args.push(&runner_val);
+            }
+        }
 
-    let output = Command::new("colima")
-        .args(&args)
-        .output()
-        .map_err(|e| format!("Failed to serve model: {}", e))?;
+        let output = Command::new("colima")
+            .args(&args)
+            .output()
+            .map_err(|e| format!("Failed to serve model: {}", e))?;
 
-    if !output.status.success() {
-        return Err(format!(
-            "model serve failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
+        if !output.status.success() {
+            return Err(format!(
+                "model serve failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
 
-    Ok(format!("Model '{}' serving on port {}", model_name, port))
+        Ok(format!("Model '{}' serving on port {}", model_name, port))
     }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 /// Delete a model
 #[tauri::command]
-pub async fn delete_model(profile: String, model_name: String, runner: Option<String>) -> Result<String, crate::error::ColimaError> {
+pub async fn delete_model(
+    profile: String,
+    model_name: String,
+    runner: Option<String>,
+) -> Result<String, crate::error::ColimaError> {
+    crate::host_features::HostFeature::ManagedVms.require()?;
     async move {
-    let mut args = vec!["model", "delete", model_name.as_str()];
-    let profile_flag;
-    if profile != "default" && !profile.is_empty() {
-        profile_flag = profile.clone();
-        args.push("--profile");
-        args.push(&profile_flag);
-    }
-    let runner_val;
-    if let Some(ref r) = runner {
-        if !r.is_empty() {
-            runner_val = r.clone();
-            args.push("--runner");
-            args.push(&runner_val);
+        let mut args = vec!["model", "delete", model_name.as_str()];
+        let profile_flag;
+        if profile != "default" && !profile.is_empty() {
+            profile_flag = profile.clone();
+            args.push("--profile");
+            args.push(&profile_flag);
         }
-    }
+        let runner_val;
+        if let Some(ref r) = runner {
+            if !r.is_empty() {
+                runner_val = r.clone();
+                args.push("--runner");
+                args.push(&runner_val);
+            }
+        }
 
-    let output = Command::new("colima")
-        .args(&args)
-        .output()
-        .map_err(|e| format!("Failed to delete model: {}", e))?;
+        let output = Command::new("colima")
+            .args(&args)
+            .output()
+            .map_err(|e| format!("Failed to delete model: {}", e))?;
 
-    if !output.status.success() {
-        return Err(format!(
-            "model delete failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
+        if !output.status.success() {
+            return Err(format!(
+                "model delete failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
 
-    Ok(format!("Model '{}' deleted", model_name))
+        Ok(format!("Model '{}' deleted", model_name))
     }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }

@@ -1,0 +1,9 @@
+{
+  "visualStudio": "2022",
+  "visualStudioMajor": 17,
+  "msvcToolset": "14.44",
+  "windowsSdk": "10.0.26100.0",
+  "target": "x86_64-pc-windows-msvc",
+  "cargoAudit": "0.22.2",
+  "servicingPolicy": "MSVC servicing patches within 14.44 are allowed. Each candidate records the exact VCToolsVersion, developer environment and compiler/linker hashes; native qualification binds to that candidate. This is not an exact vendor-patch pin or a native build result."
+}

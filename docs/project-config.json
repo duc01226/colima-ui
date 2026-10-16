@@ -51,7 +51,7 @@
       "rustUnit": "cargo test --manifest-path src-tauri/Cargo.toml --lib",
       "rustLint": "npm run lint:rust"
     },
-    "commandsNote": "Node.js >=22.22.2 is required. npm commands match package scripts, Tauri config and CI; README also documents pnpm, and both lockfiles exist, so no startup package-manager preference is selected. Rust integration tests may require Docker, Colima or Trivy and may carry #[ignore]; choose their prerequisites before running them. Run the repository's quality gates before committing or pushing; see README.md.",
+    "commandsNote": "Contributor and Windows candidate builds pin Node.js 24.21.0 (.node-version), npm 11.19.0 (packageManager) and Rust 1.99.0 (rust-toolchain.toml); use npm ci. package.json retains the minimum Node.js engine requirement. Rust live tests may require Docker, Colima or Trivy and carry #[ignore]; choose their prerequisites and owned resources before running them. Read docs/windows-qualification.md for Windows build/provider/installed proof and README.md for the normal quality gates. Authored harnesses and native qualification are separate evidence.",
     "guideDoc": "README.md"
   },
   "docsRoots": {

@@ -1,16 +1,16 @@
+use crate::api_server::{ok, ApiResponse};
 use axum::{http::StatusCode, response::Json};
-use crate::api_server::{ApiResponse, ok};
 use serde_json::json;
 
 pub async fn api_capabilities() -> (StatusCode, Json<ApiResponse<serde_json::Value>>) {
-    let caps = json!({
+    let mut caps = json!({
         "version": "1.0",
         "description": "ColimaUI capabilities schema for AI Agents",
         "endpoints": {
             "/api/capabilities": "GET - Fetch this schema",
             "/api/sandbox/execute": "POST - Execute shell commands safely",
             "/api/sandbox/execute-approved": "POST - Execute approved shell commands",
-            "/api/cli/execute_stream": "POST - Execute shell commands via SSE",
+            "/api/cli/execute_stream": "POST - Execute safe-only commands; bounded completed output via SSE",
             "/api/kb/query": "POST - Query knowledge bank",
             "/api/kb/search": "POST - Search user memories",
             "/api/settings": "GET, POST - Read/write settings",
@@ -30,6 +30,14 @@ pub async fn api_capabilities() -> (StatusCode, Json<ApiResponse<serde_json::Val
             "system-specs": { "category": "SAFE", "description": "Get host specs" }
         }
     });
-    
+
+    if cfg!(windows) {
+        if let Some(endpoints) = caps["endpoints"].as_object_mut() {
+            endpoints.retain(|path, _| !path.starts_with("/api/instances"));
+        }
+        if let Some(events) = caps["event_bus"].as_object_mut() {
+            events.retain(|name, _| !name.starts_with("colima-") && !name.starts_with("k8s-"));
+        }
+    }
     ok(caps)
 }

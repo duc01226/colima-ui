@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { isDockerOnlyHost } from "../store/capabilities.svelte";
+  import { t } from "../lib/i18n.svelte";
   import TourTooltip from "./TourTooltip.svelte";
 
   let { onComplete } = $props<{
@@ -41,7 +43,7 @@
     {
       targetSelector: '[data-tour-id="nav-terminal"]',
       title: "Terminal Access",
-      body: "SSH into your Colima instances directly from the browser. Open multiple terminal sessions in tabs.",
+      body: "Open a native terminal in a running container or another available target. Sessions stay open while you move between pages.",
       position: "right",
     },
     {
@@ -58,12 +60,14 @@
     },
   ];
 
+  let steps = $state<TourStep[]>([]);
   let currentStep = $state(0);
   let targetRect = $state<DOMRect | null>(null);
   let tooltipPos = $state({ left: 0, top: 0 });
 
   function updatePosition() {
-    const step = TOUR_STEPS[currentStep];
+    const step = steps[currentStep];
+    if (!step) return;
     const el = document.querySelector(step.targetSelector);
     if (!el) return;
 
@@ -100,6 +104,12 @@
   });
 
   onMount(() => {
+    steps = TOUR_STEPS.filter((item) => document.querySelector(item.targetSelector)).map((item) => {
+      if (!isDockerOnlyHost()) return item;
+      const target = item.targetSelector.match(/data-tour-id="([^"]+)"/)?.[1] ?? "sidebar-nav";
+      return { ...item, title: t(`connection.tour_${target}_title`), body: t(`connection.tour_${target}_body`) };
+    });
+    if (steps.length === 0) { onComplete(); return; }
     updatePosition();
     window.addEventListener("resize", updatePosition);
     return () => {
@@ -112,7 +122,7 @@
   });
 
   function handleNext() {
-    if (currentStep < TOUR_STEPS.length - 1) {
+    if (currentStep < steps.length - 1) {
       currentStep += 1;
     } else {
       onComplete();
@@ -125,7 +135,7 @@
     }
   }
 
-  let step = $derived(TOUR_STEPS[currentStep]);
+  let step = $derived(steps[currentStep]);
   const padding = 6;
 
   let clipPath = $derived(
@@ -142,6 +152,7 @@
   );
 </script>
 
+{#if step}
 <div class="tour-overlay">
   <!-- Dark backdrop with spotlight hole -->
   <div
@@ -162,10 +173,12 @@
   <TourTooltip
     {step}
     {currentStep}
-    totalSteps={TOUR_STEPS.length}
+    totalSteps={steps.length}
     {tooltipPos}
     {onComplete}
     {handlePrev}
     {handleNext}
   />
 </div>
+
+{/if}

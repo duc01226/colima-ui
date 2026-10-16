@@ -182,6 +182,7 @@ fn disable_blocking() -> Result<String, String> {
 }
 
 pub fn configure_autostart_blocking(enable: bool) -> Result<String, String> {
+    crate::host_features::HostFeature::ManagedVms.require()?;
     if enable {
         enable_blocking()
     } else {

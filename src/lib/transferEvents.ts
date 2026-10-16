@@ -94,8 +94,16 @@ export function subscribeTransfer(handlers: TransferHandlers): () => void {
   let retryDelay = INITIAL_RETRY_MS;
 
   async function connect() {
-    const token = await getApiToken();
-    const base = await resolveApiBase();
+    let token: string;
+    let base: string;
+    try { token = await getApiToken(); base = await resolveApiBase(); }
+    catch {
+      if (cancelled) return;
+      handlers.onDesync?.();
+      retryTimeout = setTimeout(connect, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, MAX_RETRY_MS);
+      return;
+    }
     if (cancelled) return;
     const url = token ? `${base}/api/events?token=${token}` : `${base}/api/events`;
     source = new EventSource(url);

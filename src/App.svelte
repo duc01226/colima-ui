@@ -1,11 +1,16 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { uiState, dashboardState } from "./store.svelte";
+  import { uiState, dashboardState, dockerState, resourceState } from "./store.svelte";
   import { appState, loadAllSettings, getAppSetting, setAppSetting } from "./lib/settingsStore.svelte";
   import { startDataPoller, refreshManual } from "./lib/dataPoller";
   import { handleGlobalKeydown } from "./lib/keyboardShortcuts";
   import { startTransferNotifications } from "./lib/transferNotifications";
+  import { openNotificationPanel } from "./store/notifications.svelte";
   import { startAnnouncements } from "./lib/announcements";
+  import { capabilitiesState, loadCapabilities, isDockerOnlyHost, pageAvailable } from "./store/capabilities.svelte";
+  import { engineConnectionState, loadEngineConnection } from "./lib/engineConnection.svelte";
+  import { refetchAllResources } from "./lib/dataPoller";
+  import { t } from "./lib/i18n.svelte";
   import * as Icons from "./components/Icons.svelte";
 
   import Dashboard from "./pages/Dashboard.svelte";
@@ -37,6 +42,7 @@
   import ToastContainer from "./components/ToastContainer.svelte";
   import ErrorDetailPanel from "./components/ErrorDetailPanel.svelte";
   import { isRunningInTauri } from "./lib/env";
+  import { createRecoveryDrafts } from "./lib/recoveryDrafts.svelte";
 
   let isTauri = $state(isRunningInTauri());
 
@@ -56,6 +62,41 @@
     observer.observe(node, { childList: true, subtree: true });
     return { destroy: () => observer.disconnect() };
   }
+
+  let appMounted = $state(false);
+  let detectTimer: ReturnType<typeof setTimeout> | null = null;
+  let tourTimer: ReturnType<typeof setTimeout> | null = null;
+  function openEngineSettings() { uiState.settingsSection = "engine"; uiState.currentPage = "settings"; }
+  async function recheckConnection() {
+    await loadCapabilities();
+    if (isDockerOnlyHost()) await loadEngineConnection();
+    if (appMounted) await refetchAllResources();
+  }
+  function scheduleTour() {
+    if (getAppSetting("colimaui_tour_complete") !== "true") {
+      tourTimer = setTimeout(() => { if (appMounted) showTour = true; }, 300);
+    }
+  }
+  const independentPage = $derived(["settings", "help", "terminal"].includes(uiState.currentPage));
+  const engineUnavailable = $derived(isDockerOnlyHost() && !engineConnectionState.snapshot?.active.ready);
+  const resourceSnapshotPending = $derived.by(() => {
+    const generation = engineConnectionState.snapshot?.active.generation;
+    return isDockerOnlyHost() && (generation == null || dockerState.originGeneration !== generation || resourceState.loadedGeneration !== generation);
+  });
+  const recoveryDrafts = createRecoveryDrafts(() => {
+    const active = engineConnectionState.snapshot?.active;
+    if (!isDockerOnlyHost() || independentPage || !active?.engine_id) return null;
+    return {
+      key: JSON.stringify([uiState.currentPage, active.context, active.endpoint, active.engine_id]),
+      revision: active.generation,
+      suspended: !capabilitiesState.platform || capabilitiesState.failed || engineUnavailable || !!dockerState.error || resourceSnapshotPending,
+    };
+  });
+  $effect(() => recoveryDrafts.reconcile());
+  $effect(() => {
+    const generation = engineConnectionState.snapshot?.active.generation;
+    if (appMounted && isDockerOnlyHost() && generation != null && generation !== dockerState.originGeneration && !dockerState.error) void refetchAllResources();
+  });
 
   let showWizard = $state(false);
   let showTour = $state(false);
@@ -102,9 +143,10 @@
 
   onMount(() => {
     // Redact secrets from any uncaught frontend error before it hits the console.
+    appMounted = true;
     installCrashReporter();
 
-    setTimeout(() => {
+    detectTimer = setTimeout(() => {
       if (!isTauri) {
         isTauri = isRunningInTauri();
       }
@@ -118,14 +160,18 @@
     cleanupTransfers = startTransferNotifications();
     (async () => {
       await loadAllSettings();
+      if (!appMounted) return;
       cleanupPoller = startDataPoller();
       // Last, and inside the same chain: the first poll needs settings loaded
       // — the off switch and the set of ids already shown live there.
       if (!announcementsTornDown) cleanupAnnouncements = startAnnouncements();
-    })();
+    })().catch(() => { if (appMounted) uiState.globalError = t("connection.bootstrap_failed"); });
   });
 
   onDestroy(() => {
+    appMounted = false;
+    if (detectTimer) clearTimeout(detectTimer);
+    if (tourTimer) clearTimeout(tourTimer);
     if (cleanupPoller) cleanupPoller();
     if (cleanupTransfers) cleanupTransfers();
     if (cleanupAnnouncements) cleanupAnnouncements();
@@ -145,12 +191,43 @@
     {#if uiState.globalError}
       <div style="padding: 8px 24px; background: rgba(248, 81, 73, 0.1); color: var(--accent-red); font-size: var(--text-sm); border-bottom: 1px solid var(--border-primary); display: flex; align-items: center; justify-content: space-between;">
         <span style="display: flex; align-items: center; gap: 6px;">{@html Icons.Warning} {uiState.globalError}</span>
-        <button class="btn btn-ghost" style="font-size: var(--text-xs); padding: 2px 8px;" onclick={() => uiState.globalError = null}>
-          Dismiss
-        </button>
+        <div class="engine-actions">
+          {#if isDockerOnlyHost()}<button type="button" class="btn btn-ghost" onclick={openNotificationPanel}>{t("connection.view_transfers")}</button>{/if}
+          <button type="button" class="btn btn-ghost" onclick={() => uiState.globalError = null}>{t("common.close")}</button>
+        </div>
       </div>
     {/if}
 
+    {#if isDockerOnlyHost()}
+      <div class="engine-context">
+        <span>{t("connection.active", { engine: engineConnectionState.snapshot?.active.context ?? t("connection.unknown_engine") })}</span>
+        <span>{engineConnectionState.loading ? t("connection.loading") : t(engineUnavailable ? "connection.unavailable_title" : "connection.connected_short")}</span>
+        <button type="button" class="btn btn-ghost" onclick={openEngineSettings}>{t("connection.settings")}</button>
+      </div>
+    {/if}
+
+    {#if !independentPage && (!capabilitiesState.platform || capabilitiesState.failed)}
+      <div class="empty-state" role="status">
+        <h2>{t(capabilitiesState.failed ? "connection.features_failed" : "connection.platform_checking")}</h2>
+        <button type="button" class="btn btn-primary" disabled={capabilitiesState.loading} onclick={() => void recheckConnection()}>{t("common.retry")}</button>
+      </div>
+    {:else if !pageAvailable(uiState.currentPage)}
+      <div class="empty-state">
+        <h2>{t("connection.unsupported_title")}</h2>
+        <p>{t("connection.unsupported", { feature: t("connection.this_feature") })}</p>
+        <button type="button" class="btn btn-primary" onclick={() => uiState.currentPage = "containers"}>{t("connection.continue")}</button>
+      </div>
+    {:else if !independentPage && isDockerOnlyHost() && (engineUnavailable || dockerState.error)}
+      <div class="empty-state" role="status">
+        <h2>{t(engineUnavailable ? "connection.unavailable_title" : "connection.resource_failed")}</h2>
+        <p>{engineUnavailable ? t("connection.start_engine") : dockerState.error}</p>
+        <div class="engine-actions"><button type="button" class="btn btn-primary" disabled={engineConnectionState.loading} onclick={() => void recheckConnection()}>{t("connection.check")}</button>
+        <button type="button" class="btn btn-ghost" onclick={openEngineSettings}>{t("connection.settings")}</button></div>
+      </div>
+    {:else if !independentPage && resourceSnapshotPending}
+      <div class="empty-state" role="status"><p>{t("connection.resources_loading")}</p></div>
+    {:else}
+    {#key isDockerOnlyHost() ? engineConnectionState.snapshot?.active.generation : "legacy"}
     {#if uiState.currentPage === "dashboard"}
       <Dashboard systemInfo={dashboardState.systemInfo} loading={false} onNavigate={(p) => uiState.currentPage = p} />
     {:else if uiState.currentPage === "instances"}
@@ -190,6 +267,9 @@
       </div>
     {/if}
 
+    {/key}
+    {/if}
+
     <!-- Terminal sits outside the page chain because every other page can be
          destroyed on navigation and this one cannot. Unmounting it runs each
          TerminalInstance's cleanup, which calls `terminal_close` and kills the
@@ -222,16 +302,12 @@
       onComplete={() => {
         showWizard = false;
         setAppSetting("colimaui_setup_complete", "true");
-        if (getAppSetting("colimaui_tour_complete") !== "true") {
-          setTimeout(() => showTour = true, 300);
-        }
+        scheduleTour();
       }}
       onSkip={() => {
         showWizard = false;
         setAppSetting("colimaui_setup_complete", "true");
-        if (getAppSetting("colimaui_tour_complete") !== "true") {
-          setTimeout(() => showTour = true, 300);
-        }
+        scheduleTour();
       }}
     />
   {/if}
@@ -253,3 +329,11 @@
      z-index: 99999 is always above modals and overlays. -->
 <ToastContainer />
 </ErrorBoundary>
+
+<style>
+  .engine-context { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; padding: 8px 24px; color: var(--text-primary); background: var(--bg-content); border-bottom: 1px solid var(--border-primary); font-size: var(--text-sm); }
+  .engine-context span { overflow-wrap: anywhere; min-width: 0; }
+  .engine-context .btn { margin-left: auto; white-space: normal; }
+  .engine-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+  .engine-actions .btn { white-space: normal; }
+</style>

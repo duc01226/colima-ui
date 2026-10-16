@@ -4,10 +4,13 @@ export const dockerState = $state({
   containers: [] as DockerContainer[],
   images: [] as DockerImage[],
   loading: true,
+  error: null as string | null,
+  originGeneration: null as number | null,
   eventCooldownUntil: 0,
 });
 
 export const resourceState = $state({
+  loadedGeneration: null as number | null,
   volumes: [] as DockerVolume[],
   volumesLoading: true,
   networks: [] as DockerNetwork[],
@@ -90,6 +93,7 @@ export const uiState = $state({
    * Terminal page casts it back to `SessionKind`.
    */
   pendingTerminalSession: null as unknown,
+  pendingContainerLogs: null as { containerId: string; engine: string } | null,
 });
 
 /** Navigate to the Help page with a specific article open. */

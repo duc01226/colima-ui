@@ -1,5 +1,5 @@
 <script module lang="ts">
-  const activeSchedules = new Map<string, number>();
+  const activeSchedules = new Map<string, ReturnType<typeof setTimeout>>();
 </script>
 
 <script lang="ts">

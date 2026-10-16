@@ -248,9 +248,8 @@ pub fn prune_summary(stdout: &str) -> String {
         .lines()
         .filter(|l| {
             let l = l.trim();
-            !l.is_empty()
-                && !l.starts_with("Total reclaimed space:")
-                && !l.ends_with(':') // section headers like "Deleted Images:"
+            !l.is_empty() && !l.starts_with("Total reclaimed space:") && !l.ends_with(':')
+            // section headers like "Deleted Images:"
         })
         .count();
 
@@ -303,6 +302,7 @@ pub fn db_path() -> PathBuf {
 /// `DELETE`s every fiftieth one.
 static DB: LazyLock<Mutex<Option<Connection>>> = LazyLock::new(|| Mutex::new(None));
 
+#[cfg(not(test))]
 fn open_at(path: &std::path::Path) -> Result<Connection, String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create data dir: {e}"))?;
@@ -350,11 +350,25 @@ fn now_ms() -> i64 {
 
 /// Run `f` against the store, opening it on first use.
 fn with_db<T>(f: impl FnOnce(&mut Connection) -> Result<T, String>) -> Result<T, String> {
-    let mut guard = DB.lock().map_err(|_| "activity database is poisoned".to_string())?;
+    let mut guard = DB
+        .lock()
+        .map_err(|_| "activity database is poisoned".to_string())?;
     if guard.is_none() {
-        *guard = Some(open_at(&db_path())?);
+        #[cfg(not(test))]
+        let conn = open_at(&db_path())?;
+        // Library fixtures can call real commands/recording. Never open or
+        // prune the account's activity history from a cfg(test) executable.
+        #[cfg(test)]
+        let conn = {
+            let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
+            create_schema(&conn)?;
+            conn
+        };
+        *guard = Some(conn);
     }
-    let conn = guard.as_mut().ok_or_else(|| "activity database is unavailable".to_string())?;
+    let conn = guard
+        .as_mut()
+        .ok_or_else(|| "activity database is unavailable".to_string())?;
     f(conn)
 }
 
@@ -367,7 +381,10 @@ pub fn record(entry: ActivityEntry) {
 
     // Opportunistic, and after the write rather than before it: pruning is
     // never the reason an action's record is late.
-    if WRITES.fetch_add(1, Ordering::Relaxed).is_multiple_of(RETENTION_EVERY) {
+    if WRITES
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(RETENTION_EVERY)
+    {
         if let Err(e) = with_db(|conn| run_retention(conn, now_ms())) {
             eprintln!("[Activity] retention failed: {e}");
         }
@@ -503,6 +520,18 @@ pub async fn activity_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // TechnicalSpec=activity-library-store-isolation: actual command recording
+    // and reads in a library-test process must never open/prune account history.
+    #[test]
+    fn library_recording_uses_memory_instead_of_account_history() {
+        let file: String = with_db(|conn| {
+            conn.query_row("PRAGMA database_list", [], |row| row.get(2))
+                .map_err(|e| e.to_string())
+        })
+        .unwrap();
+        assert!(file.is_empty(), "test recording unexpectedly opened a file");
+    }
 
     fn temp_conn() -> Connection {
         let conn = Connection::open_in_memory().expect("open");
@@ -688,7 +717,9 @@ mod tests {
         run_retention(&mut conn, now).expect("retention");
 
         assert!(
-            select(&conn, &ActivityFilter::default()).expect("select").is_empty(),
+            select(&conn, &ActivityFilter::default())
+                .expect("select")
+                .is_empty(),
             "a row past the year ceiling must go even for a paid install"
         );
     }
@@ -707,7 +738,10 @@ mod tests {
 
         let by_kind = select(
             &conn,
-            &ActivityFilter { kind: Some("lifecycle".into()), ..Default::default() },
+            &ActivityFilter {
+                kind: Some("lifecycle".into()),
+                ..Default::default()
+            },
         )
         .expect("by kind");
         assert_eq!(by_kind.len(), 1);
@@ -715,7 +749,10 @@ mod tests {
 
         let by_target = select(
             &conn,
-            &ActivityFilter { target: Some("sha256:one".into()), ..Default::default() },
+            &ActivityFilter {
+                target: Some("sha256:one".into()),
+                ..Default::default()
+            },
         )
         .expect("by target");
         assert_eq!(by_target.len(), 1);
@@ -723,7 +760,10 @@ mod tests {
 
         let by_time = select(
             &conn,
-            &ActivityFilter { from_ms: Some(1_500), ..Default::default() },
+            &ActivityFilter {
+                from_ms: Some(1_500),
+                ..Default::default()
+            },
         )
         .expect("by time");
         assert_eq!(by_time.len(), 1);

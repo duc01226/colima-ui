@@ -196,3 +196,15 @@ describe("TransferDialog", () => {
     expect(screen.getByText(/\.tar archive/i)).toBeInTheDocument();
   });
 });
+
+// TC010/014: a native Windows basename must not expose the host account/folder.
+it("hands off only the Windows archive name to notifications", async () => {
+  render(TransferDialog, { props: { mode: "import", onClose: () => {} } });
+  await typeInto(/images\.tar/, String.raw`C:\Users\private-account\資料\images.tar`);
+  await fireEvent.click(startButton());
+  await waitFor(() => expect(notificationState.entries.some((e) => e.job?.jobId === "load-1")).toBe(true));
+  const entry = notificationState.entries.find((e) => e.job?.jobId === "load-1");
+  expect(JSON.stringify(entry)).toContain("images.tar");
+  expect(JSON.stringify(entry)).not.toContain("private-account");
+  expect(JSON.stringify(entry)).not.toContain("資料");
+});

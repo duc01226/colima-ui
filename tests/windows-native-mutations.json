@@ -1,0 +1,145 @@
+{
+  "purpose": "Additional required native Windows seeds. Missing native host remains ENVIRONMENT-BLOCKED, never a skipped PASS.",
+  "seeds": [
+    {
+      "id": "native-path-case-alias",
+      "file": "src-tauri/src/validation.rs",
+      "from": "b.as_ptr(),\n                b.len() as i32,\n                1,\n            ) == 2",
+      "to": "b.as_ptr(), b.len() as i32, 0, ) == 2",
+      "case": "TC-WINUI-028",
+      "intent": "case aliases cannot obtain independent destination claims",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "validation::tests::native_case_aliases",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "platforms": [
+        "win32"
+      ]
+    },
+    {
+      "id": "native-job-cpu-units",
+      "file": "src-tauri/src/child_process.rs",
+      "from": "cpu_seconds: ticks as f64 / 10_000_000.0",
+      "to": "cpu_seconds: ticks as f64 / 1_000_000_000.0",
+      "case": "TC-WINUI-021",
+      "intent": "native CPU includes exited descendants with correct 100ns units",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "child_process::tests::resource_usage_includes",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "platforms": [
+        "win32"
+      ]
+    },
+    {
+      "id": "native-http-prerequisite-daemon-independent",
+      "file": "src-tauri/src/helpers.rs",
+      "from": "return system::system_info();",
+      "to": "let mut info = system::system_info();\n        info.docker_installed = run_cmd(\"docker\", &[\"--version\"]).is_ok();\n        return info;",
+      "case": "TC-WINUI-002",
+      "intent": "HTTP and IPC installation metadata agree with usable CLI and unusable engine; owned CLI fixture prevents personal-engine access",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "helpers::tests::native_prerequisite_projections_do_not_require_an_engine",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "platforms": [
+        "win32"
+      ]
+    },
+    {
+      "id": "native-missing-tool-attribution",
+      "file": "src-tauri/src/helpers.rs",
+      "from": "return format!(\"{program} is unavailable. Check the native executable and the selected Docker Desktop or Rancher Moby engine.\");",
+      "to": "return format!(\"{program} is not installed. Check the native executable and the selected Docker Desktop or Rancher Moby engine.\");",
+      "case": "TC-WINUI-002",
+      "intent": "native missing-tool error and remediation remain platform-correct",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "helpers::tests::run_cmd_hints_at_installation",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "platforms": [
+        "win32"
+      ]
+    },
+    {
+      "id": "native-conpty-failed-start-io",
+      "file": "src-tauri/src/windows_pty.rs",
+      "from": "    let mut master = Master {\n        console,\n        size: Mutex::new(size),\n        stop_input: Arc::new(std::sync::atomic::AtomicBool::new(false)),\n        input_thread: None,\n        output_thread: None,\n    };\n    // Reverse local drop order matters: on any later acquisition error these\n    // duplicate pipe ends must close before Master joins its output reader.\n    // Keep them until process creation succeeds on the normal path.\n    let parent_pipe_ends = (input_read, output_write);",
+      "to": "    let parent_pipe_ends = (input_read, output_write);\n    let mut master = Master {\n        console,\n        size: Mutex::new(size),\n        stop_input: Arc::new(std::sync::atomic::AtomicBool::new(false)),\n        input_thread: None,\n        output_thread: None,\n    };\n    // Reverse local drop order matters: on any later acquisition error these\n    // duplicate pipe ends must close before Master joins its output reader.\n    // Keep them until process creation succeeds on the normal path.",
+      "case": "TC-WINUI-013",
+      "intent": "post-console failed acquisition must release parent pipe ends before joining output; bounded real failed-launch guard raises an assertion before runner timeout",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "windows_pty::tests::failed_console_launch_releases_owned_io_before_returning",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "platforms": [
+        "win32"
+      ]
+    },
+    {
+      "id": "native-benchmark-host-refusal",
+      "file": "src-tauri/src/commands/k8s_cluster.rs",
+      "from": "crate::host_features::HostFeature::Kubernetes.require()?;\n    if !url.starts_with",
+      "to": "crate::host_features::HostFeature::ManagedVms.require()?;\n    if !url.starts_with",
+      "case": "TC-WINUI-015",
+      "intent": "the benchmark reports intended Kubernetes host refusal before malformed URL validation, without network acquisition",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "commands::k8s_cluster::tests::benchmark_requires_a_supported_host_and_http_url",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "platforms": [
+        "win32"
+      ]
+    }
+  ]
+}

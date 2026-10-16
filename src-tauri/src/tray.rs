@@ -238,7 +238,9 @@ fn build_menu(
         items.push(Box::new(PredefinedMenuItem::separator(app)?));
     }
 
-    if instances.is_empty() {
+    if cfg!(windows) {
+        // VM lifecycle belongs to the external engine provider.
+    } else if instances.is_empty() {
         let none = MenuItem::with_id(app, "noop:none", "No instances", false, None::<&str>)?;
         items.push(Box::new(none));
     } else {
@@ -263,25 +265,40 @@ fn build_menu(
             // Disabled while an operation is in flight: this is what stops a
             // second click on a stale menu from firing a second command.
             items.push(Box::new(MenuItem::with_id(
-                app, id, label, !busy, None::<&str>,
+                app,
+                id,
+                label,
+                !busy,
+                None::<&str>,
             )?));
         }
     }
 
     items.push(Box::new(PredefinedMenuItem::separator(app)?));
     items.push(Box::new(MenuItem::with_id(
-        app, "show", "Open ColimaUI", true, None::<&str>,
+        app,
+        "show",
+        "Open ColimaUI",
+        true,
+        None::<&str>,
     )?));
     items.push(Box::new(MenuItem::with_id(
-        app, "help", "Help", true, None::<&str>,
+        app,
+        "help",
+        "Help",
+        true,
+        None::<&str>,
     )?));
     // Offered only when something could actually be acting: the switch is on,
     // and a rule is set to act by itself. An entry reading "Stop self-healing"
     // on an install where nothing can act invites the user to fix a problem
     // they do not have.
     let can_act = crate::commands::self_heal::is_enabled()
-        && crate::commands::self_heal::list_rules()
-            .is_ok_and(|rules| rules.iter().any(|r| r.enabled && r.mode == crate::commands::self_heal::HealMode::Auto));
+        && crate::commands::self_heal::list_rules().is_ok_and(|rules| {
+            rules
+                .iter()
+                .any(|r| r.enabled && r.mode == crate::commands::self_heal::HealMode::Auto)
+        });
     if can_act {
         items.push(Box::new(MenuItem::with_id(
             app,
@@ -293,7 +310,11 @@ fn build_menu(
     }
     items.push(Box::new(PredefinedMenuItem::separator(app)?));
     items.push(Box::new(MenuItem::with_id(
-        app, "quit", "Quit", true, None::<&str>,
+        app,
+        "quit",
+        "Quit",
+        true,
+        None::<&str>,
     )?));
 
     let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
@@ -484,7 +505,10 @@ pub fn init(app: &AppHandle) {
     match result {
         Ok(_) => refresh_from_state(app),
         Err(e) => {
-            eprintln!("[tray] system tray unavailable, continuing without it: {}", e);
+            eprintln!(
+                "[tray] system tray unavailable, continuing without it: {}",
+                e
+            );
             return;
         }
     }

@@ -75,6 +75,8 @@ Two consequences worth stating plainly:
   locally, and base-image alternatives come from `resources/catalog/v1.json`
   shipped inside the app, not from a lookup service.
 
+Assistant configuration checks expose only a known provider identifier and model/key/endpoint presence in conversation content. Raw stored credentials, private endpoint/model text and unrelated settings are excluded from that result, including inactive providers; failed reads use fixed unknown-status text. This minimization is specific to the configuration tool result, not arbitrary user-authored content. The explicitly selected provider credential still authenticates the connection outside the conversation body (`src/lib/aiEvents/config.ts:47`, `src/lib/agentCore.ts:101`, `src/lib/agentCore.ts:348`, `src/lib/llmProviders.ts:20`).
+
 ## Local-only data
 
 Never transmitted, stored on this machine only:

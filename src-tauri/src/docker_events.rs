@@ -40,6 +40,9 @@ const CHANNEL_CAPACITY: usize = 512;
 /// One container lifecycle event, as Docker reported it.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ContainerEvent {
+    /// Process-local provenance; external event payloads cannot grant this.
+    #[serde(skip)]
+    pub origin_generation: Option<u64>,
     /// Docker's own timestamp in seconds; 0 when the daemon omitted it.
     pub ts: i64,
     /// `start`, `die`, `kill`, `oom`, `health_status: unhealthy`, …
@@ -128,6 +131,7 @@ pub fn from_bollard(msg: &bollard::models::EventMessage) -> Option<ContainerEven
     };
 
     Some(ContainerEvent {
+        origin_generation: None,
         ts: msg.time.unwrap_or(0),
         action,
         container_id: actor.and_then(|a| a.id.clone()).unwrap_or_default(),
@@ -271,6 +275,7 @@ mod tests {
 
         for i in 0..5 {
             publish(ContainerEvent {
+                origin_generation: None,
                 ts: 1_700_000_000 + i,
                 action: "die".to_string(),
                 container_id: "loop-1".to_string(),
@@ -291,6 +296,7 @@ mod tests {
     #[test]
     fn publishing_without_subscribers_is_harmless() {
         publish(ContainerEvent {
+            origin_generation: None,
             ts: 0,
             action: "start".to_string(),
             container_id: "nobody-listening".to_string(),

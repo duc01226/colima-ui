@@ -38,7 +38,9 @@ Grab the latest release from [**GitHub Releases**](https://github.com/vnknowledg
 > This removes the download quarantine flag and is only needed for the
 > downloaded build, not for locally compiled apps.
 
-> **Browser mode:** After launching the app, access the full web UI at `http://127.0.0.1:11420` from any browser.
+> **Browser development:** `npm run dev` serves the frontend at `http://localhost:1420`. The packaged localhost API binds an available port in 11420–11429 and does not serve frontend assets. Browser credentials are handed off out of band; there is no HTTP token endpoint (`src-tauri/src/api_server.rs:66`, `vite.config.ts:43`).
+
+Windows 11 x64 support is in preparation for existing Docker Desktop and Rancher Desktop Moby engines with Linux containers. Candidate/signing tools are authored; native qualification and a Windows release remain pending. See the [Windows qualification procedure](docs/windows-qualification.md). Windows does not install/provision an engine or offer VM/Kubernetes/runtime management (`src-tauri/src/host_features.rs:16`).
 
 ---
 
@@ -70,14 +72,14 @@ Grab the latest release from [**GitHub Releases**](https://github.com/vnknowledg
 ### 🤖 AI Diagnostic Agent
 - **Self-learning AI** — Expert-level troubleshooting for Colima/Lima/Docker/Kubernetes errors
 - **5-tool agent loop** — Web search, page fetch, diagnostic log collection, safe command execution, user-approved commands
-- **Knowledge Bank** — SQLite-backed memory (`~/.colima-ui/knowledge.db`) with 22+ builtin solutions, user feedback via 👍/👎
+- **Knowledge Bank** — SQLite-backed memory (Windows native LocalAppData/`ColimaUI/knowledge.db`; macOS/Linux `~/.colima-ui/knowledge.db`) with 22+ builtin solutions, user feedback via 👍/👎
 - **3-tier command sandbox** — Safe (auto-run), Approve (user click), Banned (Rust-level block). Prevents destructive commands even if AI hallucinates
 - **Multi-provider AI Chat** — Anthropic, OpenAI, Google, Ollama, OpenRouter, Groq, Together AI, Mistral, DeepSeek
 - **AI Models** — Pull, delete, and serve Ollama models directly
 
 ### 📊 Dashboard & UI
 - System overview with running/stopped counts, CPU/memory allocation
-- Integrated xterm.js terminal with SSH into instances
+- Integrated xterm.js terminal with SSH into instances on supported hosts and native Docker ContainerExec sessions
 - Setup Wizard & Getting Started Tour for new users
 - Dark theme with glassmorphism effects and micro-animations
 - Context menus, keyboard shortcuts, global toast notifications
@@ -89,20 +91,19 @@ Grab the latest release from [**GitHub Releases**](https://github.com/vnknowledg
 
 ### Prerequisites
 
-- **[Colima](https://github.com/abiosoft/colima)** — Container runtime manager
-- **[Docker CLI](https://docs.docker.com/engine/install/)** — Container engine client
-- **[Node.js](https://nodejs.org/) ≥ 22.22.2** — Frontend build and test suite (`.nvmrc` pins the line; jsdom and undici in the test stack need it, and an older Node fails as an unrelated-looking `markAsUncloneable` error rather than a version complaint)
-- **[Rust](https://www.rust-lang.org/tools/install)** — Backend build
-- **[kubectl](https://kubernetes.io/docs/tasks/tools/)** *(optional)* — Kubernetes features
-- **[Kind](https://kind.sigs.k8s.io/)** *(optional)* — Kind cluster management
-- **[Ollama](https://ollama.ai/)** *(optional)* — Local AI model management
+- **Node.js 24.21.0, npm 11.19.0 and Rust 1.99.0** — contributor pins in `.node-version`, `package.json` and `rust-toolchain.toml`; the package retains Node ≥22.22.2 as its minimum engine constraint.
+- **Docker CLI and an existing engine** — Windows preparation targets Docker Desktop or Rancher Desktop Moby with Linux containers. Other hosts retain their existing Docker/Colima prerequisites.
+- **Colima** — for Colima VM management on supported hosts.
+- **Native Tauri prerequisites** — host C++/platform libraries; Windows uses the declared Visual Studio 2022/MSVC/SDK policy and WebView2 in the [qualification guide](docs/windows-qualification.md).
+- **Git for Windows** — supplies the shell for the existing POSIX Git hooks on Windows.
+- **kubectl, Kind and Ollama** *(optional on supported hosts)* — their feature prerequisites do not authorize unsupported Windows operations.
 
 ### Development
 
 ```bash
 git clone https://github.com/vnknowledge2014/colima-ui.git
 cd colima-ui
-npm install
+npm ci
 
 # Desktop app (Tauri native window + Vite dev server)
 npm run tauri dev
@@ -113,27 +114,23 @@ npm run dev
 
 ### Lint & Quality Gates
 
-The repo enforces strict dead-code / unused-code rules on **every push** (pre-push
-hook, mirrored by CI). Agents and humans alike must run all four gates before
-committing:
+Use the pinned contributor toolchain and run the repository gates before committing or pushing:
 
 ```bash
-pnpm lint          # ESLint: dead code, unused vars/imports, `any`, error-prone patterns
-pnpm typecheck     # TypeScript
-pnpm check         # Svelte check
-pnpm check:tokens  # No var() reading a CSS custom property nothing defines
-pnpm check:i18n    # All locales carry the same keys
-pnpm test          # Unit tests (vitest)
-pnpm lint:rust     # cargo clippy --all-targets -- -D warnings (dead code, unused imports)
+npm run lint
+npm run typecheck
+npm run check
+npm run check:tokens
+npm run check:i18n
+npm test
+npm run test:tooling
+npm run check:windows
+npm run lint:rust
 ```
 
-The same set runs in CI (`.github/workflows/ci.yml`), which additionally runs
-`cargo test --lib`. Rust integration tests are marked `#[ignore]` because they
-need a real Docker daemon or Trivy; run them deliberately with
-`cargo test -- --ignored`.
+The npm pre-push hook runs these gates; its explicit skip branch means hook installation alone is not evidence of execution. CI additionally runs locked native Rust library tests on macOS/Linux/hosted Windows and dependency-health checks. Live ignored Docker/Trivy suites need their stated prerequisites and deliberate selection; see [Boundary testing](docs/integration-test-reference.md). Hosted Windows Server checks do not qualify Windows 11 installed behavior.
 
-`git push --no-verify` / `SKIP_LINT_GATES=1` are emergency-only and need explicit
-approval.
+`git push --no-verify` / `SKIP_LINT_GATES=1` are emergency-only and need explicit approval.
 
 ### Production Build
 
@@ -145,6 +142,8 @@ npm run tauri build
 npm run build
 ```
 
+For Windows per-user NSIS candidates, real signature checks, dedicated provider fixtures, installed metrics/account/update controls and evidence limits, follow [Windows qualification](docs/windows-qualification.md). A successful compile or candidate receipt is preparation evidence.
+
 ---
 
 ## 🛠️ Tech Stack
@@ -152,12 +151,12 @@ npm run build
 | Layer | Technology | Version |
 |-------|-----------|---------|
 | **Frontend** | Svelte 5 (Runes) | 5.56 |
-| **Language** | TypeScript | 5.8 |
+| **Language** | TypeScript | ~6.0.3 |
 | **Bundler** | Vite | 8.x |
 | **Desktop** | Tauri | 2.x |
 | **Backend** | Rust (Edition 2021) | — |
 | **HTTP Server** | Axum | 0.8 |
-| **Docker Client** | Bollard | 0.18 |
+| **Docker Client** | Bollard | 0.21 |
 | **Terminal** | xterm.js | 6.0 |
 | **Database** | SQLite (rusqlite) | — |
 | **Styling** | Vanilla CSS (dark theme) | — |
@@ -176,11 +175,11 @@ colima-ui/
 │   ├── store/                    # Svelte 5 rune-based state
 │   ├── lib/                      # API layer, AI bus, i18n, utilities
 │   ├── styles/                   # CSS design system (tokens, reset, layout, ...)
-│   └── locales/                  # i18n (en, vi, zh)
+│   └── locales/                  # i18n (en, ja, vi, zh)
 ├── src-tauri/                    # Backend (Rust + Tauri)
 │   ├── src/
 │   │   ├── lib.rs                # App setup & command registration
-│   │   ├── api_server.rs         # Axum router & HTTP server (port 11420)
+│   │   ├── api_server.rs         # Axum localhost API (11420–11429)
 │   │   ├── commands/             # 14 command modules (business logic)
 │   │   ├── routes/               # 14 HTTP route modules (thin delegation)
 │   │   ├── adapters/             # Unified DevOps adapter traits
@@ -206,8 +205,8 @@ colima-ui/
 
 ## 🔄 CI/CD & Releases
 
-- **CI** (`.github/workflows/ci.yml`) — TypeScript checking, `cargo check` + `cargo clippy` (macOS ARM64/x86, Linux), frontend build validation
-- **Release** (`.github/workflows/release.yml`) — Builds DMG/deb/AppImage on version tags, creates GitHub Release
+- **CI** (`.github/workflows/ci.yml`) — frontend/tooling/foundation checks, locked all-target/all-feature Rust check/Clippy on macOS/Linux/hosted Windows, native library tests and dependency health.
+- **Release** (`.github/workflows/release.yml`) — builds DMG/deb/AppImage on version tags using the portable semantic-version writer. Windows candidate/signing and native qualification use separate dispatch workflows and do not publish a Windows release.
 
 ```bash
 # Bump version, commit, tag, and push

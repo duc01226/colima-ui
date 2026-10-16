@@ -14,7 +14,8 @@ use tokio::sync::RwLock;
 /// own copy, and when that copy was removed in favour of calling this, the
 /// difference between them turned out to be the `connect_with_defaults()`
 /// fallback — i.e. every machine running Docker Desktop rather than colima.
-pub(crate) fn connect_bollard() -> Option<Docker> {
+#[cfg(not(windows))]
+fn connect_local_bollard() -> Option<Docker> {
     // Try Colima socket detection first
     if let Some((host, _)) = crate::path_util::detect_docker_host() {
         // host is like "unix:///Users/mike/.colima/default/docker.sock"
@@ -25,6 +26,23 @@ pub(crate) fn connect_bollard() -> Option<Docker> {
     }
     // Fallback to defaults (works if /var/run/docker.sock exists or DOCKER_HOST is set)
     Docker::connect_with_defaults().ok()
+}
+
+// The Windows branch performs asynchronous engine verification.
+#[cfg_attr(not(windows), allow(clippy::unused_async))]
+pub(crate) async fn connect_bollard() -> Option<Docker> {
+    #[cfg(windows)]
+    {
+        crate::engine_connection::active()
+            .ok()?
+            .verified_client()
+            .await
+            .ok()
+    }
+    #[cfg(not(windows))]
+    {
+        connect_local_bollard()
+    }
 }
 
 pub struct DockerState {
@@ -45,7 +63,10 @@ impl DockerState {
     /// Creates a new DockerState. Never panics — if Docker is unavailable,
     /// `docker` is `None` and caches start empty.
     pub fn new() -> Self {
-        let docker = connect_bollard();
+        #[cfg(not(windows))]
+        let docker = connect_local_bollard();
+        #[cfg(windows)]
+        let docker: Option<Docker> = None;
         if docker.is_none() {
             let containerd = crate::instance_reader::running_containerd_profiles();
             if containerd.is_empty() {
@@ -69,7 +90,9 @@ impl DockerState {
     /// Returns a reference to the Docker client, or an error if not connected.
     #[allow(dead_code)]
     pub fn docker(&self) -> Result<&Docker, String> {
-        self.docker.as_ref().ok_or_else(|| "Docker daemon is not connected".to_string())
+        self.docker
+            .as_ref()
+            .ok_or_else(|| "Docker daemon is not connected".to_string())
     }
 }
 
@@ -99,7 +122,7 @@ pub async fn start_docker_watcher(app: AppHandle, state: Arc<RwLock<DockerState>
         }
 
         // Try to connect (or reconnect) to Docker daemon via Colima socket
-        let docker = match connect_bollard() {
+        let docker = match connect_bollard().await {
             Some(d) => {
                 // Verify connection is actually alive with a ping (with timeout)
                 match tokio::time::timeout(std::time::Duration::from_secs(5), d.ping()).await {
@@ -115,6 +138,29 @@ pub async fn start_docker_watcher(app: AppHandle, state: Arc<RwLock<DockerState>
                 }
             }
             None => {
+                #[cfg(windows)]
+                {
+                    let changed = {
+                        let mut lock = state.write().await;
+                        let changed = lock.docker.is_some()
+                            || !lock.containers_cache.is_empty()
+                            || !lock.images_cache.is_empty();
+                        lock.docker = None;
+                        lock.containers_cache.clear();
+                        lock.images_cache.clear();
+                        changed
+                    };
+                    if changed {
+                        let status = serde_json::to_value(crate::engine_connection::status())
+                            .unwrap_or_default();
+                        let empty =
+                            serde_json::json!({"containers": [], "images": [], "engine": status});
+                        crate::sse::publish_sse_event("docker-connection-lost", &status);
+                        crate::sse::publish_sse_event("docker-state-updated", &empty);
+                        let _ = app.emit("docker-connection-lost", status);
+                        let _ = app.emit("docker-state-updated", empty);
+                    }
+                }
                 let containerd = crate::instance_reader::running_containerd_profiles();
                 if !containerd.is_empty() {
                     let mut lock = state.write().await;
@@ -168,13 +214,35 @@ pub async fn start_docker_watcher(app: AppHandle, state: Arc<RwLock<DockerState>
         // fires kill→stop→die within ~200ms), wait for the burst to settle before
         // refreshing. This ensures we always capture the FINAL state, not an
         // intermediate transition state.
+        #[cfg(windows)]
+        let origin_generation = match crate::engine_connection::read_generation() {
+            Ok(g) => Some(g),
+            Err(_) => continue,
+        };
+        #[cfg(not(windows))]
+        let origin_generation = None;
+        let publish_lifecycle = |message: &bollard::models::EventMessage| {
+            if let Some(event) = crate::docker_events::from_bollard(message) {
+                crate::docker_events::publish(crate::docker_events::ContainerEvent {
+                    origin_generation,
+                    ..event
+                });
+            }
+        };
         let mut stream = docker.events(Some(EventsOptions::default()));
         let debounce_ms: u64 = 500; // wait 500ms after last event before fetching
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
+        heartbeat.reset();
 
         loop {
             // Wait for the next event
             let event = tokio::select! {
                 ev = stream.next() => ev,
+                _ = heartbeat.tick(), if cfg!(windows) => {
+                    #[cfg(windows)]
+                    if connect_bollard().await.is_none() || crate::engine_connection::read_generation().ok() != origin_generation { break; }
+                    continue;
+                }
             };
 
             match event {
@@ -184,9 +252,7 @@ pub async fn start_docker_watcher(app: AppHandle, state: Arc<RwLock<DockerState>
                     // debounce is about to destroy — five restarts in ten seconds
                     // collapse into one refresh here, and a crash-loop rule reading
                     // only this path would never see the loop. See `docker_events`.
-                    if let Some(e) = crate::docker_events::from_bollard(&ev) {
-                        crate::docker_events::publish(e);
-                    }
+                    publish_lifecycle(&ev);
 
                     // Event received — now drain any further events within the debounce window
                     // (trailing-edge: keep resetting the timer while events keep coming)
@@ -202,9 +268,7 @@ pub async fn start_docker_watcher(app: AppHandle, state: Arc<RwLock<DockerState>
                                 // published: these are exactly the events a burst
                                 // is made of, and they are the ones that matter to
                                 // anything counting.
-                                if let Some(e) = crate::docker_events::from_bollard(&ev) {
-                                    crate::docker_events::publish(e);
-                                }
+                                publish_lifecycle(&ev);
                                 // Another event within the window — keep draining
                                 continue;
                             }
@@ -240,10 +304,13 @@ pub async fn start_docker_watcher(app: AppHandle, state: Arc<RwLock<DockerState>
         }
 
         // Stream ended — check if Docker is actually gone or just a transient stream error
+        #[cfg(not(windows))]
         let ping_ok = matches!(
             tokio::time::timeout(std::time::Duration::from_secs(5), docker.ping()).await,
             Ok(Ok(_))
         );
+        #[cfg(windows)]
+        let ping_ok = connect_bollard().await.is_some();
         if ping_ok {
             // Docker is still alive — transient stream error.
             // Don't clear state, just reconnect the event stream.
@@ -277,18 +344,20 @@ pub async fn start_docker_watcher(app: AppHandle, state: Arc<RwLock<DockerState>
 pub fn map_containers(containers: &[bollard::models::ContainerSummary]) -> Vec<serde_json::Value> {
     let mut mapped = Vec::new();
     for c in containers {
-        let names = c.names.clone().unwrap_or_default().join(", ").replace("/", "");
+        let names = c
+            .names
+            .clone()
+            .unwrap_or_default()
+            .join(", ")
+            .replace("/", "");
         let ports = match &c.ports {
             Some(ports) => ports
                 .iter()
                 .map(|p| {
-                    let typ_str = p
-                        .typ
-                        .as_ref()
-                        .map_or_else(
-                            || "tcp".to_string(),
-                            |t| format!("{:?}", t).to_lowercase().replace("\"", ""),
-                        );
+                    let typ_str = p.typ.as_ref().map_or_else(
+                        || "tcp".to_string(),
+                        |t| format!("{:?}", t).to_lowercase().replace("\"", ""),
+                    );
                     if let Some(ip) = &p.ip {
                         format!(
                             "{}:{}->{}/{}",
@@ -356,6 +425,45 @@ async fn update_cache(
     docker: &Docker,
     state: &Arc<RwLock<DockerState>>,
 ) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    crate::engine_connection::active()?
+        .verified_client()
+        .await?;
+    #[cfg(windows)]
+    let generation = crate::engine_connection::read_generation()?;
+    let resources = fetch_resources(docker).await?;
+    let containers = resources.containers;
+    let images = resources.images;
+
+    let mapped_containers = map_containers(&containers);
+    let mapped_images = map_images(&images);
+
+    let mut lock = state.write().await;
+    #[cfg(windows)]
+    crate::engine_connection::ensure_generation(generation)?;
+    lock.containers_cache = mapped_containers.clone();
+    lock.images_cache = mapped_images.clone();
+
+    #[allow(unused_mut)]
+    let mut snapshot = serde_json::json!({
+        "containers": mapped_containers,
+        "images": mapped_images
+    });
+    #[cfg(windows)]
+    {
+        snapshot["origin_generation"] = serde_json::json!(generation);
+    }
+    Ok(snapshot)
+}
+
+/// Raw SDK snapshot shared by native/SSE projections. Unavailable or partial
+/// reads are errors; only successful empty responses mean an empty engine.
+pub(crate) struct DockerResources {
+    pub containers: Vec<bollard::models::ContainerSummary>,
+    pub images: Vec<bollard::models::ImageSummary>,
+}
+
+pub(crate) async fn fetch_resources(docker: &Docker) -> Result<DockerResources, String> {
     let containers = match tokio::time::timeout(
         std::time::Duration::from_secs(5),
         docker.list_containers(Some(ListContainersOptions {
@@ -367,8 +475,10 @@ async fn update_cache(
     {
         Ok(Ok(c)) => c,
         Ok(Err(e)) => {
-            eprintln!("[DockerWatcher] list_containers error: {}", e);
-            vec![]
+            return Err(crate::redact::redact_err(
+                "Docker container snapshot unavailable",
+                e,
+            ));
         }
         Err(_) => {
             return Err("update_cache: list_containers timed out".to_string());
@@ -386,23 +496,76 @@ async fn update_cache(
     {
         Ok(Ok(i)) => i,
         Ok(Err(e)) => {
-            eprintln!("[DockerWatcher] list_images error: {}", e);
-            vec![]
+            return Err(crate::redact::redact_err(
+                "Docker image snapshot unavailable",
+                e,
+            ));
         }
         Err(_) => {
             return Err("update_cache: list_images timed out".to_string());
         }
     };
 
-    let mapped_containers = map_containers(&containers);
-    let mapped_images = map_images(&images);
+    Ok(DockerResources { containers, images })
+}
 
-    let mut lock = state.write().await;
-    lock.containers_cache = mapped_containers.clone();
-    lock.images_cache = mapped_images.clone();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        http::{StatusCode, Uri},
+        Json, Router,
+    };
 
-    Ok(serde_json::json!({
-        "containers": mapped_containers,
-        "images": mapped_images
-    }))
+    struct Server(tokio::task::JoinHandle<()>);
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    #[derive(Clone, Copy)]
+    enum Fixture {
+        Empty,
+        Populated,
+        ContainersUnavailable,
+        ImagesUnavailable,
+    }
+
+    async fn client(fixture: Fixture) -> (Docker, Server) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let router = Router::new().fallback(move |uri: Uri| async move {
+            let containers = uri.path().ends_with("/containers/json");
+            if (containers && matches!(fixture, Fixture::ContainersUnavailable)) || (!containers && matches!(fixture, Fixture::ImagesUnavailable)) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message":"fixture unavailable"})));
+            }
+            let data = if containers && !matches!(fixture, Fixture::Empty) {
+                serde_json::json!([{"Id":"sentinel", "Names":["/owned"], "Image":"fixture", "State":"running", "Status":"Up", "Command":"true", "Created":0}])
+            } else { serde_json::json!([]) };
+            (StatusCode::OK, Json(data))
+        });
+        let server = Server(tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        }));
+        (
+            Docker::connect_with_http(&address, 5, bollard::API_DEFAULT_VERSION).unwrap(),
+            server,
+        )
+    }
+
+    // TC-WINUI-002/007/009/035: production SDK reads, with a real local HTTP
+    // fixture. This proves snapshot/error semantics, not Windows provider access.
+    #[tokio::test]
+    async fn unavailable_or_partial_snapshot_is_never_a_healthy_empty_engine() {
+        for fixture in [Fixture::ContainersUnavailable, Fixture::ImagesUnavailable] {
+            let (docker, _server) = client(fixture).await;
+            assert!(fetch_resources(&docker).await.is_err());
+        }
+        let (docker, _server) = client(Fixture::Empty).await;
+        let empty = fetch_resources(&docker).await.unwrap();
+        assert!(empty.containers.is_empty() && empty.images.is_empty());
+        let (docker, _server) = client(Fixture::Populated).await;
+        let populated = fetch_resources(&docker).await.unwrap();
+        assert_eq!(populated.containers[0].id.as_deref(), Some("sentinel"));
+    }
 }

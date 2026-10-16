@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { isDockerOnlyHost, blockingCapability, capabilityNotice, loadCapabilities } from "../store/capabilities.svelte";
+  import { onMount, onDestroy } from "svelte";
   import { composeApi, type ComposeProject } from "../lib/api";
   import { globalToast } from "../lib/globalToast";
   import { t } from "../lib/i18n.svelte";
@@ -8,6 +9,10 @@
   import * as Icons from "../components/Icons.svelte";
   import { viewInTopology, consumeFocus } from "../lib/topology-link";
   import { setVisibleInterval } from "../lib/visibleInterval";
+  import { recoveryDraft } from "../lib/recoveryDrafts.svelte";
+
+  let mounted = true;
+  onDestroy(() => { mounted = false; });
 
   let projects = $state<ComposeProject[]>([]);
   let loading = $state(true);
@@ -17,12 +22,26 @@
   let logs = $state("");
   let services = $state("");
   let detailTab = $state<"services" | "logs" | "diagnose">("services");
+  let recoveryProject: string | null = null;
+  recoveryDraft("compose-intent", () => ({ project: selectedProject?.Name ?? recoveryProject, detailTab }), (draft) => {
+    recoveryProject = draft.project; detailTab = draft.detailTab;
+  });
+
+  const prerequisite = $derived(isDockerOnlyHost() ? blockingCapability("docker-compose") : undefined);
+  const notice = $derived(prerequisite ? capabilityNotice(prerequisite) : undefined);
+  async function retryProjects() { await loadCapabilities(); await fetchProjects(); }
 
   async function fetchProjects() {
+    if (prerequisite) { projects = []; error = capabilityNotice(prerequisite).text; loading = false; return; }
     try {
       error = null;
       const list = await composeApi.list();
       projects = list;
+      if (recoveryProject) {
+        const target = projects.find((p) => p.Name === recoveryProject);
+        recoveryProject = null;
+        if (target) void openProject(target, detailTab);
+      }
     } catch (e) {
       error = String(e);
       projects = [];
@@ -33,6 +52,7 @@
 
   onMount(() => {
     fetchProjects().then(() => {
+      if (!mounted) return;
       // Arrived from the topology graph's "Open in Compose": open that
       // project's panel. A project that has since gone is ignored.
       const focus = consumeFocus("compose");
@@ -63,9 +83,9 @@
     }
   }
 
-  async function openProject(p: ComposeProject) {
+  async function openProject(p: ComposeProject, tab: typeof detailTab = "services") {
     selectedProject = p;
-    detailTab = "services";
+    detailTab = tab;
     try {
       const [svc, lg] = await Promise.all([
         composeApi.ps(p.Name),
@@ -199,8 +219,9 @@
             <path d="M22 8.35V20a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8.35A2 2 0 0 1 3.26 6.5l8-3.2a2 2 0 0 1 1.48 0l8 3.2A2 2 0 0 1 22 8.35Z"/>
           </svg>
         </div>
-        <div class="empty-state-title">{error ? t('compose.error_title', { default: 'Docker not connected' }) : t('compose.empty_title', { default: 'No Compose Projects' })}</div>
-        <div class="empty-state-text">{error ? t('compose.error_text', { default: 'Docker daemon is not connected. Make sure a Colima profile is running.' }) : t('compose.empty_text', { default: 'Start a docker-compose project to see it listed here.' })}</div>
+        <div class="empty-state-title">{notice?.title ?? (error ? t('compose.error_title', { default: 'Docker not connected' }) : t('compose.empty_title', { default: 'No Compose Projects' }))}</div>
+        <div class="empty-state-text">{notice?.text ?? (error ? (isDockerOnlyHost() ? t('connection.compose_failed') : t('compose.error_text', { default: 'Docker daemon is not connected. Make sure a Colima profile is running.' })) : t('compose.empty_text', { default: 'Start a docker-compose project to see it listed here.' }))}</div>
+        {#if error}<button type="button" class="btn btn-ghost" onclick={() => void retryProjects()}>{t("common.retry")}</button>{/if}
       </div>
     {/if}
   {/if}

@@ -3,53 +3,78 @@ use std::process::Command;
 /// Detect the active container runtime name and profile.
 /// Returns (runtime_name, profile_name, docker_host_socket).
 pub fn detect_runtime() -> (String, String, Option<String>) {
-    let mut runtime_name = "docker".to_string();
-    let mut profile_name = "default".to_string();
-    let mut host_sock = None;
-
-    if let Some((host, profile)) = crate::path_util::detect_docker_host() {
-        host_sock = Some(host);
-        profile_name = profile;
+    #[cfg(windows)]
+    {
+        let target = crate::engine_connection::active().ok();
+        (
+            "docker".into(),
+            target
+                .as_ref()
+                .map_or_else(|| "unavailable".into(), |c| c.target().context().into()),
+            target.as_ref().map(|c| c.target().endpoint().into()),
+        )
     }
+    #[cfg(not(windows))]
+    {
+        let mut runtime_name = "docker".to_string();
+        let mut profile_name = "default".to_string();
+        let mut host_sock = None;
 
-    // Determine runtime from colima status output
-    let status_output = Command::new(crate::path_util::resolve_binary("colima"))
-        .args(["status", "-p", &profile_name])
-        .output();
-
-    if let Ok(output) = status_output {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if stdout.contains("runtime: podman") {
-            runtime_name = "podman".to_string();
-        } else if stdout.contains("runtime: containerd") {
-            runtime_name = "containerd".to_string();
+        if let Some((host, profile)) = crate::path_util::detect_docker_host() {
+            host_sock = Some(host);
+            profile_name = profile;
         }
-    }
 
-    (runtime_name, profile_name, host_sock)
+        // Determine runtime from colima status output
+        let status_output = Command::new(crate::path_util::resolve_binary("colima"))
+            .args(["status", "-p", &profile_name])
+            .output();
+
+        if let Ok(output) = status_output {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("runtime: podman") {
+                runtime_name = "podman".to_string();
+            } else if stdout.contains("runtime: containerd") {
+                runtime_name = "containerd".to_string();
+            }
+        }
+
+        (runtime_name, profile_name, host_sock)
+    }
 }
 
 /// Gets the appropriate CLI command (`docker`, `podman`, or `nerdctl`)
 /// based on the current active Colima profile's runtime.
-pub fn get_runtime_cmd() -> Command {
-    let (runtime_name, profile_name, host_sock) = detect_runtime();
-
-    let mut cmd;
-    if runtime_name == "containerd" {
-        // Colima provides `colima nerdctl` wrapper which correctly executes inside the VM
-        cmd = Command::new(crate::path_util::resolve_binary("colima"));
-        cmd.args(["-p", &profile_name, "nerdctl"]);
-    } else {
-        let bin = if runtime_name == "containerd" { "nerdctl" } else { &runtime_name };
-        cmd = Command::new(crate::path_util::resolve_binary(bin));
-        if let Some(host) = host_sock {
-            // For podman and docker, setting DOCKER_HOST works natively on macOS
-            cmd.env("DOCKER_HOST", host);
-        }
+pub fn get_runtime_cmd() -> Result<Command, String> {
+    #[cfg(windows)]
+    {
+        crate::engine_connection::active()?.command()
     }
+    #[cfg(not(windows))]
+    {
+        let (runtime_name, profile_name, host_sock) = detect_runtime();
 
-    crate::path_util::apply_path_to_cmd(&mut cmd);
-    cmd
+        let mut cmd;
+        if runtime_name == "containerd" {
+            // Colima provides `colima nerdctl` wrapper which correctly executes inside the VM
+            cmd = Command::new(crate::path_util::resolve_binary("colima"));
+            cmd.args(["-p", &profile_name, "nerdctl"]);
+        } else {
+            let bin = if runtime_name == "containerd" {
+                "nerdctl"
+            } else {
+                &runtime_name
+            };
+            cmd = Command::new(crate::path_util::resolve_binary(bin));
+            if let Some(host) = host_sock {
+                // For podman and docker, setting DOCKER_HOST works natively on macOS
+                cmd.env("DOCKER_HOST", host);
+            }
+        }
+
+        crate::path_util::apply_path_to_cmd(&mut cmd);
+        Ok(cmd)
+    }
 }
 
 /// Run a runtime CLI command and collect its output.
@@ -78,21 +103,29 @@ pub async fn run(
     args: Vec<String>,
     timeout: std::time::Duration,
 ) -> Result<std::process::Output, String> {
-    let result = tokio::time::timeout(
-        timeout,
-        tokio::task::spawn_blocking(move || {
-            get_runtime_cmd()
-                .args(args.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
-                .output()
-                .map_err(|e| format!("Failed to run docker command: {}", e))
-        }),
-    )
-    .await;
-
-    match result {
-        Ok(join_result) => join_result.map_err(|e| format!("Task join error: {}", e))?,
-        Err(_) => Err("Docker command timed out (daemon may be unresponsive)".to_string()),
-    }
+    let started = std::time::Instant::now();
+    tokio::task::spawn_blocking(move || {
+        if started.elapsed() >= timeout {
+            return Err("Docker command timed out".to_string());
+        }
+        #[cfg(windows)]
+        crate::engine_connection::validate_argv(&args)?;
+        let mut command = get_runtime_cmd()?;
+        command.args(args);
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err("Docker command timed out".to_string());
+        }
+        crate::child_process::capture(command, remaining, 16 * 1024 * 1024).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                "Docker command timed out (daemon may be unresponsive)".to_string()
+            } else {
+                format!("Failed to run docker command: {e}")
+            }
+        })
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 /// The wait the four merged copies used. Kept as the single default so the
@@ -103,10 +136,11 @@ pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 #[tauri::command]
 pub async fn get_runtime_info() -> Result<String, crate::error::ColimaError> {
     async move {
-    let (runtime_name, _, _) = detect_runtime();
-    Ok(runtime_name)
+        let (runtime_name, _, _) = detect_runtime();
+        Ok(runtime_name)
     }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 #[cfg(test)]
@@ -146,9 +180,11 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a running container runtime"]
     async fn the_merged_path_reaches_a_real_runtime() {
-        for args in [vec!["ps".to_string(), "--format".to_string(), "json".to_string()],
-                     vec!["volume".to_string(), "ls".to_string()],
-                     vec!["compose".to_string(), "ls".to_string()]] {
+        for args in [
+            vec!["ps".to_string(), "--format".to_string(), "json".to_string()],
+            vec!["volume".to_string(), "ls".to_string()],
+            vec!["compose".to_string(), "ls".to_string()],
+        ] {
             let label = args.join(" ");
             let output = run(args, DEFAULT_TIMEOUT)
                 .await

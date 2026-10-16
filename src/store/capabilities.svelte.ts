@@ -7,11 +7,12 @@
  * rest of the app showed a blank table and left the user to work it out.
  */
 
-import { systemApi, type Capability, type CapabilityState } from "../lib/api";
+import { systemApi, type Capability, type CapabilityState, type PlatformInfo } from "../lib/api";
 import { t } from "../lib/i18n.svelte";
 
 export const capabilitiesState = $state({
   items: [] as Capability[],
+  platform: null as PlatformInfo | null,
   loading: false,
   /** Set when detection itself failed, as opposed to a tool being missing. */
   failed: false,
@@ -32,7 +33,9 @@ export async function loadCapabilities(): Promise<void> {
   capabilitiesState.loading = true;
   _inflight = (async () => {
     try {
-      capabilitiesState.items = await systemApi.getCapabilities();
+      const [items, platform] = await Promise.all([systemApi.getCapabilities(), systemApi.getPlatform()]);
+      capabilitiesState.items = items;
+      capabilitiesState.platform = platform;
       capabilitiesState.failed = false;
     } catch {
       // Detection failing is not the same as a tool being absent — leave the
@@ -66,9 +69,12 @@ export function isUsable(id: string): boolean {
  * Returns `undefined` when the tool is fine and the list is genuinely empty.
  */
 export function blockingCapability(...ids: string[]): Capability | undefined {
+  if (capabilitiesState.failed) return { id: "detection", name: "Docker", state: "unknown" };
   for (const id of ids) {
+    if (id === "colima" && ids.includes("docker") && isDockerOnlyHost()) continue;
     const cap = capability(id);
-    if (cap && cap.state !== "running") return cap;
+    if (!cap) return { id, name: id === "docker" ? "Docker" : id, state: "unknown" };
+    if (cap.state !== "running") return cap;
   }
   return undefined;
 }
@@ -89,6 +95,23 @@ export interface CapabilityNotice {
  */
 export function capabilityNotice(cap: Capability): CapabilityNotice {
   const name = cap.name;
+
+  if (cap.state === "unsupported") return {
+    title: t("connection.unsupported_title", { default: "Unavailable on this host" }),
+    text: t("connection.unsupported", { feature: name, default: "{feature} is unavailable on this host. Open Containers to use Docker resources." }),
+  };
+
+  if (isDockerOnlyHost() && cap.state === "missing" && cap.id === "docker") return {
+    title: t("connection.cli_missing_title"), text: t("connection.cli_missing"),
+  };
+  if (isDockerOnlyHost() && cap.state === "missing" && cap.id === "docker-compose") return {
+    title: t("connection.compose_missing_title"), text: t("connection.compose_missing"),
+  };
+
+  if (cap.id === "docker" && isDockerOnlyHost() && cap.state === "installed_not_running") return {
+    title: t("connection.unavailable_title", { default: "Docker engine unavailable" }),
+    text: t("connection.start_engine", { default: "Open Docker Desktop with Linux containers or Rancher Desktop with Moby, then check again." }),
+  };
 
   if (cap.state === "missing") {
     return {
@@ -117,4 +140,14 @@ export function capabilityNotice(cap: Capability): CapabilityNotice {
       default: "Detection failed. Check that the tool is on your PATH.",
     }),
   };
+}
+
+/** One UI policy for navigation, acquisition and assistance; backend still guards effects. */
+export function isDockerOnlyHost(): boolean { return capabilitiesState.platform?.os === "windows"; }
+export function supportsHostVms(): boolean { return capabilitiesState.platform !== null && !isDockerOnlyHost(); }
+export function supportsKubernetes(): boolean { return supportsHostVms(); }
+export function pageAvailable(page: string): boolean {
+  if (["instances", "linux-vms", "models"].includes(page)) return supportsHostVms();
+  if (["kubernetes", "xray", "cluster-topology"].includes(page)) return supportsKubernetes();
+  return true;
 }

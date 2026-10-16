@@ -10,12 +10,22 @@ use tauri::State;
 
 use crate::terminal_session::{SessionKind, SharedSessionManager};
 
-/// How many sessions may be open at once.
-///
-/// Each tab is a real shell inside the VM holding an ssh connection, and tabs
-/// are cheap to open by accident. Without a ceiling a long session of clicking
-/// quietly exhausts the VM.
-const MAX_SESSIONS: usize = 16;
+/// Carry a verified origin into the existing retained Terminal view. IPC only.
+#[tauri::command]
+pub async fn terminal_target(
+    container_id: String,
+) -> Result<SessionKind, crate::error::ColimaError> {
+    tokio::task::spawn_blocking(move || -> Result<SessionKind, String> {
+        let (_, engine) = crate::terminal_session::container_command(&container_id)?;
+        Ok(SessionKind::ContainerExec {
+            container_id,
+            engine,
+        })
+    })
+    .await
+    .map_err(|e| crate::error::ColimaError::from(format!("Terminal task failed: {e}")))?
+    .map_err(crate::error::ColimaError::from)
+}
 
 /// Note which session was opened, so the UI can offer "reopen last session".
 ///
@@ -23,6 +33,10 @@ const MAX_SESSIONS: usize = 16;
 /// stored or logged: people type credentials into shells.
 fn record_session_opened(kind: &SessionKind) {
     let (k, target) = match kind {
+        SessionKind::ContainerExec {
+            container_id,
+            engine,
+        } => ("containerExec", format!("{engine}/{container_id}")),
         SessionKind::Colima { profile } => ("colima", profile.clone()),
         SessionKind::Lima { instance } => ("lima", instance.clone()),
         SessionKind::K8sExec {
@@ -56,29 +70,19 @@ pub async fn terminal_create(
     kind: SessionKind,
     on_output: Channel<String>,
 ) -> Result<(), crate::error::ColimaError> {
-    let mut m = mgr.lock().unwrap();
-
-    // Re-creating an existing id is a reconnect, not a new session, so it must
-    // not count against the cap — otherwise a user at the ceiling can no longer
-    // reattach to the tabs they already have.
-    if !m.contains(&session_id) && m.len() >= MAX_SESSIONS {
-        return Err(crate::error::ColimaError::from(format!(
-            "Too many terminal sessions open ({MAX_SESSIONS}). Close one first."
-        )));
-    }
-
-    record_session_opened(&kind);
-
-    m.create(
-        &session_id,
-        &kind,
+    crate::terminal_session::create_shared_session(
+        (*mgr).clone(),
+        session_id,
+        kind.clone(),
         Box::new(move |text| {
-            // A send failure means the webview dropped the channel — the tab is
-            // gone. Nothing useful to do here; `terminal_close` does the reaping.
+            // The session owns the channel lifetime; Close reaps its child.
             let _ = on_output.send(text);
         }),
     )
-    .map_err(crate::error::ColimaError::from)
+    .await
+    .map_err(crate::error::ColimaError::from)?;
+    record_session_opened(&kind);
+    Ok(())
 }
 
 #[tauri::command]
@@ -122,5 +126,6 @@ pub async fn terminal_close(
     session_id: String,
 ) -> Result<(), crate::error::ColimaError> {
     let mut m = mgr.lock().unwrap();
-    m.close(&session_id).map_err(crate::error::ColimaError::from)
+    m.close(&session_id)
+        .map_err(crate::error::ColimaError::from)
 }

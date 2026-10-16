@@ -129,9 +129,21 @@ async fn section_versions() -> Section {
             "Tool versions",
             format!(
                 "colima: {}\ndocker: {}\nlima: {}",
-                if info.colima_installed { info.colima_version.trim() } else { "not installed" },
-                if info.docker_installed { info.docker_version.trim() } else { "not installed" },
-                if info.lima_installed { info.lima_version.trim() } else { "not installed" },
+                if info.colima_installed {
+                    info.colima_version.trim()
+                } else {
+                    "not installed"
+                },
+                if info.docker_installed {
+                    info.docker_version.trim()
+                } else {
+                    "not installed"
+                },
+                if info.lima_installed {
+                    info.lima_version.trim()
+                } else {
+                    "not installed"
+                },
             ),
             true,
         ),
@@ -140,13 +152,20 @@ async fn section_versions() -> Section {
 }
 
 fn section_host() -> Section {
-    let specs = crate::commands::system::detect_host_specs();
+    let specs = match crate::commands::system::detect_host_specs() {
+        Ok(specs) => specs,
+        Err(e) => return Section::unavailable("host", "Host", e),
+    };
     Section::new(
         "host",
         "Host",
         format!(
             "Model: {}\nArch: {}\nCPU cores: {}\nMemory: {} GiB\nDisk: {} GiB free of {} GiB",
-            specs.model, specs.arch, specs.cpu_cores, specs.memory_gib, specs.disk_free_gib,
+            specs.model,
+            specs.arch,
+            specs.cpu_cores,
+            specs.memory_gib,
+            specs.disk_free_gib,
             specs.disk_total_gib,
         ),
         true,
@@ -188,10 +207,13 @@ async fn section_containers() -> Section {
             let body = list
                 .iter()
                 .map(|c| {
-                    let get = |k: &str| {
-                        c.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
-                    };
-                    format!("{} — image: {}, status: {}", get("Names"), get("Image"), get("Status"))
+                    let get = |k: &str| c.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    format!(
+                        "{} — image: {}, status: {}",
+                        get("Names"),
+                        get("Image"),
+                        get("Status")
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -212,10 +234,7 @@ async fn section_logs(container_id: &str, lines: u32) -> Section {
         Ok(logs) => {
             let (logs, dropped) = trim_to_tail(&logs, MAX_LOG_BYTES);
             let body = if dropped > 0 {
-                format!(
-                    "(trimmed {} bytes of older log lines)\n{}",
-                    dropped, logs
-                )
+                format!("(trimmed {} bytes of older log lines)\n{}", dropped, logs)
             } else {
                 logs
             };
@@ -378,7 +397,10 @@ pub fn render_markdown(bundle: &DiagnosticBundle, include: &[String]) -> String 
 
 fn render_markdown_raw(bundle: &DiagnosticBundle, include: &[String]) -> String {
     let mut out = String::new();
-    out.push_str(&format!("## ColimaUI diagnostics ({})\n\n", bundle.app_version));
+    out.push_str(&format!(
+        "## ColimaUI diagnostics ({})\n\n",
+        bundle.app_version
+    ));
     if !bundle.signature.is_empty() {
         out.push_str(&format!("**Signature:** `{}`\n\n", bundle.signature));
     }
@@ -393,7 +415,10 @@ fn render_markdown_raw(bundle: &DiagnosticBundle, include: &[String]) -> String 
         .iter()
         .filter(|s| include.iter().any(|id| id == &s.id))
     {
-        out.push_str(&format!("### {}\n\n```\n{}\n```\n\n", section.title, section.content));
+        out.push_str(&format!(
+            "### {}\n\n```\n{}\n```\n\n",
+            section.title, section.content
+        ));
     }
     out
 }
@@ -422,7 +447,9 @@ pub async fn save_diagnostic_bundle(
     file_name: String,
     overwrite: bool,
 ) -> Result<String, crate::error::ColimaError> {
-    Ok(save_bundle(&bundle, &include, &dest_dir, &file_name, overwrite)?)
+    Ok(save_bundle(
+        &bundle, &include, &dest_dir, &file_name, overwrite,
+    )?)
 }
 
 pub fn save_bundle(
@@ -560,7 +587,10 @@ mod tests {
         // seconds per megabyte, so a multi-megabyte fixture here would make the
         // test suite pay for a case the collector already prevents.
         let line = "x".repeat(99);
-        let huge = (0..100).map(|i| format!("{i:04} {line}")).collect::<Vec<_>>().join("\n");
+        let huge = (0..100)
+            .map(|i| format!("{i:04} {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut sections = vec![
             Section::new("app", "App", "small", true),
             Section::new("logs", "Logs", &huge, false),
@@ -589,7 +619,8 @@ mod tests {
     fn the_same_error_signs_the_same_on_different_machines() {
         // Same failure, two machines: different home directory, different line
         // numbers. Grouping duplicate reports depends on these matching.
-        let a = "yaml: line 12: mapping values are not allowed at /Users/alice/app/docker-compose.yml";
+        let a =
+            "yaml: line 12: mapping values are not allowed at /Users/alice/app/docker-compose.yml";
         let b = "yaml: line 47: mapping values are not allowed at /home/bob/srv/docker-compose.yml";
         let sig_a = crate::commands::compose_diagnose::error_signature(&redact(a));
         let sig_b = crate::commands::compose_diagnose::error_signature(&redact(b));
@@ -634,7 +665,11 @@ mod tests {
             truncated_bytes: 0,
         };
         let md = render_markdown(&tampered, &["logs".to_string()]);
-        assert!(!md.contains("hunter2"), "unredacted content reached the output:\n{}", md);
+        assert!(
+            !md.contains("hunter2"),
+            "unredacted content reached the output:\n{}",
+            md
+        );
     }
 
     #[test]
@@ -654,27 +689,42 @@ mod tests {
 
     #[test]
     fn saving_refuses_to_escape_the_chosen_folder() {
-        let dir = std::env::temp_dir().join(format!(
-            "colimaui-diag-{:?}",
-            std::thread::current().id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("colimaui-diag-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let bundle = bundle_with("content");
 
-        let err = save_bundle(&bundle, &["logs".to_string()], dir.to_str().unwrap(), "../escaped.md", false)
-            .expect_err("traversal must be refused");
+        let err = save_bundle(
+            &bundle,
+            &["logs".to_string()],
+            dir.to_str().unwrap(),
+            "../escaped.md",
+            false,
+        )
+        .expect_err("traversal must be refused");
         assert!(err.contains("escapes"), "unexpected error: {}", err);
 
-        let path = save_bundle(&bundle, &["logs".to_string()], dir.to_str().unwrap(), "report.md", false)
-            .expect("a plain name should write");
+        let path = save_bundle(
+            &bundle,
+            &["logs".to_string()],
+            dir.to_str().unwrap(),
+            "report.md",
+            false,
+        )
+        .expect("a plain name should write");
         assert!(std::fs::read_to_string(&path).unwrap().contains("content"));
 
         // And it will not silently replace an existing report.
-        let err = save_bundle(&bundle, &["logs".to_string()], dir.to_str().unwrap(), "report.md", false)
-            .expect_err("overwrite must be explicit");
+        let err = save_bundle(
+            &bundle,
+            &["logs".to_string()],
+            dir.to_str().unwrap(),
+            "report.md",
+            false,
+        )
+        .expect_err("overwrite must be explicit");
         assert!(err.contains("already exists"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }

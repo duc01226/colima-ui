@@ -9,7 +9,8 @@ Detailed technical documentation for the ColimaUI project.
 | [Architecture](architecture.md) | System architecture, dual-mode design, data flow |
 | [Backend](backend.md) | Rust backend: modules, commands, routes, security |
 | [Frontend](frontend.md) | Svelte 5 frontend: pages, components, state management |
-| [API Reference](api.md) | HTTP REST API endpoints (port 11420) |
+| [API Reference](api.md) | Authenticated localhost API, exact-instance discovery and IPC terminal boundary |
 | [AI System](ai.md) | AI diagnostic agent, knowledge bank, command sandbox |
 | [Topology design philosophy](topology-design-philosophy.md) | Design rules for the topology graph page — read before adding node kinds or node actions |
 | [Telemetry](telemetry.md) | What leaves the machine, when, and what it discloses |
+| [Windows qualification](windows-qualification.md) | Candidate/signing tools, dedicated provider fixtures and required native/installed evidence; qualification pending |

@@ -1,9 +1,9 @@
-use serde::{Serialize, Deserialize};
+use crate::path_util;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::process::Command;
-use crate::path_util;
 
 #[derive(Debug, Clone)]
 pub struct ResourceSaverState {
@@ -14,10 +14,13 @@ pub struct ResourceSaverState {
 
 impl Default for ResourceSaverState {
     fn default() -> Self {
-        Self { enabled: false, idle_minutes_threshold: 15, idle_minutes_count: 0 }
+        Self {
+            enabled: false,
+            idle_minutes_threshold: 15,
+            idle_minutes_count: 0,
+        }
     }
 }
-
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginsConfig {
@@ -47,15 +50,103 @@ pub struct SystemInfo {
 /// `pub(crate)` so `system_capabilities` can reuse it rather than growing a
 /// second, subtly different probe.
 pub(crate) fn get_version(cmd: &str, args: &[&str]) -> Option<String> {
+    crate::host_features::require_tool(cmd).ok()?;
+    #[cfg(not(windows))]
     let resolved = path_util::resolve_binary(cmd);
+    #[cfg(windows)]
+    let resolved = path_util::resolve_executable(cmd)?;
     let mut command = Command::new(&resolved);
     command.args(args);
     path_util::apply_path_to_cmd(&mut command);
-    command
-        .output()
+    crate::child_process::capture(command, std::time::Duration::from_secs(5), 1_048_576)
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// Prerequisite metadata does not acquire an engine connection. Keep the
+/// desktop and Windows HTTP projections on the same executable-only probe.
+pub(crate) fn system_info() -> SystemInfo {
+    system_info_with(get_version)
+}
+
+#[cfg(test)]
+mod prerequisite_tests {
+    use super::*;
+
+    // TestSpec=TC-WINUI-002: partial metadata projection/real version-probe
+    // guards. Native handler/IPC fixture and installed readiness are separate.
+    #[test]
+    fn prerequisite_metadata_preserves_present_missing_and_empty_version_states() {
+        for present in [false, true] {
+            let mut calls = Vec::new();
+            let info = system_info_with(|program, args| {
+                calls.push((
+                    program.to_owned(),
+                    args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                ));
+                present.then(|| format!("{program} version fixture"))
+            });
+            assert_eq!(info.docker_installed, present);
+            assert_eq!(info.colima_installed, present);
+            assert_eq!(info.lima_installed, present);
+            assert_eq!(
+                info.docker_version,
+                if present {
+                    "docker version fixture"
+                } else {
+                    ""
+                }
+            );
+            assert_eq!(
+                info.colima_version,
+                if present {
+                    "colima version fixture"
+                } else {
+                    ""
+                }
+            );
+            assert_eq!(
+                info.lima_version,
+                if present {
+                    "limactl version fixture"
+                } else {
+                    ""
+                }
+            );
+            assert_eq!(
+                calls,
+                vec![
+                    ("colima".into(), vec!["version".into()]),
+                    ("docker".into(), vec!["--version".into()]),
+                    ("limactl".into(), vec!["--version".into()])
+                ]
+            );
+        }
+        let info = system_info_with(|_, _| Some(String::new()));
+        assert!(info.docker_installed && info.colima_installed && info.lima_installed);
+        assert!(info.docker_version.is_empty());
+    }
+
+    #[test]
+    fn executable_version_probe_needs_no_selected_engine_or_posix_shell() {
+        assert!(get_version("node", &["--version"]).is_some_and(|v| v.starts_with('v')));
+        assert!(get_version("colimaui-no-such-binary", &["--version"]).is_none());
+    }
+}
+
+fn system_info_with(mut version: impl FnMut(&str, &[&str]) -> Option<String>) -> SystemInfo {
+    let colima_version = version("colima", &["version"]);
+    let docker_version = version("docker", &["--version"]);
+    let lima_version = version("limactl", &["--version"]);
+    SystemInfo {
+        colima_installed: colima_version.is_some(),
+        colima_version: colima_version.unwrap_or_default(),
+        docker_installed: docker_version.is_some(),
+        docker_version: docker_version.unwrap_or_default(),
+        lima_installed: lima_version.is_some(),
+        lima_version: lima_version.unwrap_or_default(),
+    }
 }
 
 /// Check system prerequisites
@@ -64,102 +155,92 @@ pub(crate) fn get_version(cmd: &str, args: &[&str]) -> Option<String> {
 #[tauri::command]
 pub async fn check_system() -> Result<SystemInfo, crate::error::ColimaError> {
     async move {
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio::task::spawn_blocking(|| {
-            let colima_version = get_version("colima", &["version"]);
-            // Use --version (not context-dependent) to avoid Docker daemon connection
-            let docker_version = get_version("docker", &["--version"]);
-            let lima_version = get_version("limactl", &["--version"]);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(system_info),
+        )
+        .await;
 
-            SystemInfo {
-                colima_installed: colima_version.is_some(),
-                colima_version: colima_version.unwrap_or_default(),
-                docker_installed: docker_version.is_some(),
-                docker_version: docker_version.unwrap_or_default(),
-                lima_installed: lima_version.is_some(),
-                lima_version: lima_version.unwrap_or_default(),
+        match result {
+            Ok(Ok(info)) => Ok(info),
+            Ok(Err(e)) => Err(format!("Task join error: {}", e)),
+            Err(_) => {
+                // Timeout — return partial info so the app doesn't freeze
+                Ok(SystemInfo {
+                    colima_installed: false,
+                    colima_version: String::new(),
+                    docker_installed: false,
+                    docker_version: String::new(),
+                    lima_installed: false,
+                    lima_version: String::new(),
+                })
             }
-        }),
-    )
-    .await;
-
-    match result {
-        Ok(Ok(info)) => Ok(info),
-        Ok(Err(e)) => Err(format!("Task join error: {}", e)),
-        Err(_) => {
-            // Timeout — return partial info so the app doesn't freeze
-            Ok(SystemInfo {
-                colima_installed: false,
-                colima_version: String::new(),
-                docker_installed: false,
-                docker_version: String::new(),
-                lima_installed: false,
-                lima_version: String::new(),
-            })
         }
     }
-    }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 /// Get Colima version string
 #[tauri::command]
 pub async fn get_colima_version() -> Result<String, crate::error::ColimaError> {
+    crate::host_features::HostFeature::ManagedVms.require()?;
     async move {
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio::task::spawn_blocking(|| {
-            Command::new("colima")
-                .args(["version"])
-                .output()
-                .map_err(|e| format!("Failed to get colima version: {}", e))
-        }),
-    )
-    .await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(|| {
+                Command::new("colima")
+                    .args(["version"])
+                    .output()
+                    .map_err(|e| format!("Failed to get colima version: {}", e))
+            }),
+        )
+        .await;
 
-    match result {
-        Ok(Ok(Ok(output))) => Ok(String::from_utf8_lossy(&output.stdout).trim().to_string()),
-        Ok(Ok(Err(e))) => Err(e),
-        Ok(Err(e)) => Err(format!("Task join error: {}", e)),
-        Err(_) => Err("Colima version check timed out".to_string()),
+        match result {
+            Ok(Ok(Ok(output))) => Ok(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(e)) => Err(format!("Task join error: {}", e)),
+            Err(_) => Err("Colima version check timed out".to_string()),
+        }
     }
-    }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 /// Check if an optional tool is installed
 #[tauri::command]
 pub async fn check_tool(name: String) -> Result<serde_json::Value, crate::error::ColimaError> {
     async move {
-    let allowed = ["kubectl", "kind", "helm", "krunkit", "nerdctl", "qemu-img"];
-    if !allowed.contains(&name.as_str()) {
-        return Err(format!("Unknown tool: {}", name));
-    }
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio::task::spawn_blocking(move || {
-            let version = if name == "kubectl" {
-                get_version(&name, &["version", "--client"])
-            } else {
-                get_version(&name, &["version"])
-                    .or_else(|| get_version(&name, &["--version"]))
-            };
-            serde_json::json!({
-                "installed": version.is_some(),
-                "version": version.unwrap_or_default()
-            })
-        }),
-    )
-    .await;
+        crate::host_features::require_tool(&name)?;
+        let allowed = ["kubectl", "kind", "helm", "krunkit", "nerdctl", "qemu-img"];
+        if !allowed.contains(&name.as_str()) {
+            return Err(format!("Unknown tool: {}", name));
+        }
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || {
+                let version = if name == "kubectl" {
+                    get_version(&name, &["version", "--client"])
+                } else {
+                    get_version(&name, &["version"]).or_else(|| get_version(&name, &["--version"]))
+                };
+                serde_json::json!({
+                    "installed": version.is_some(),
+                    "version": version.unwrap_or_default()
+                })
+            }),
+        )
+        .await;
 
-    match result {
-        Ok(Ok(json)) => Ok(json),
-        Ok(Err(e)) => Err(format!("Task join error: {}", e)),
-        Err(_) => Ok(serde_json::json!({ "installed": false, "version": "" })),
+        match result {
+            Ok(Ok(json)) => Ok(json),
+            Ok(Err(e)) => Err(format!("Task join error: {}", e)),
+            Err(_) => Ok(serde_json::json!({ "installed": false, "version": "" })),
+        }
     }
-    }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 // ===== Dependency setup =====
@@ -184,6 +265,12 @@ pub struct InstallResult {
 /// Blocking probe for Homebrew. `brew` lives in `/opt/homebrew/bin` on Apple
 /// silicon, which a bundled .app does not inherit — hence `resolve_binary`.
 pub fn homebrew_status_blocking() -> HomebrewStatus {
+    if cfg!(windows) {
+        return HomebrewStatus {
+            installed: false,
+            version: String::new(),
+        };
+    }
     let brew = path_util::resolve_binary("brew");
     let mut cmd = Command::new(&brew);
     cmd.arg("--version");
@@ -219,6 +306,7 @@ pub async fn check_homebrew() -> Result<HomebrewStatus, crate::error::ColimaErro
 /// `name` and `method` are both validated against fixed lists before anything is
 /// spawned; neither ever reaches a shell.
 pub fn install_dependency_blocking(name: &str, method: &str) -> Result<InstallResult, String> {
+    crate::host_features::HostFeature::RuntimeInstall.require()?;
     const VALID_NAMES: [&str; 3] = ["colima", "docker", "lima"];
     if !VALID_NAMES.contains(&name) {
         return Err(format!("Invalid dependency name: {}", name));
@@ -306,6 +394,7 @@ pub struct HostSpecs {
     pub model: String,
 }
 
+#[cfg(not(windows))]
 fn parse_sysctl_u64(key: &str) -> Option<u64> {
     Command::new("sysctl")
         .args(["-n", key])
@@ -320,7 +409,28 @@ fn parse_sysctl_u64(key: &str) -> Option<u64> {
         })
 }
 
-pub fn detect_host_specs() -> HostSpecs {
+#[cfg(windows)]
+pub fn detect_host_specs() -> Result<HostSpecs, String> {
+    let read = || -> std::io::Result<HostSpecs> {
+        let data = crate::path_util::try_app_data_dir()?;
+        let (free, total) = crate::windows_host::disk_space(
+            data.parent()
+                .ok_or_else(|| std::io::Error::other("Missing data volume"))?,
+        )?;
+        Ok(HostSpecs {
+            cpu_cores: crate::windows_host::cpu_cores()?,
+            memory_gib: (crate::windows_host::total_memory()? / 1_073_741_824) as u32,
+            disk_free_gib: (free / 1_073_741_824) as u32,
+            disk_total_gib: (total / 1_073_741_824) as u32,
+            arch: std::env::consts::ARCH.to_string(),
+            model: std::env::var("PROCESSOR_IDENTIFIER").unwrap_or_default(),
+        })
+    };
+    read().map_err(|e| format!("Windows host information unavailable: {e}"))
+}
+
+#[cfg(not(windows))]
+pub fn detect_host_specs() -> Result<HostSpecs, String> {
     let arch = std::env::consts::ARCH.to_string();
 
     // CPU cores
@@ -332,14 +442,18 @@ pub fn detect_host_specs() -> HostSpecs {
             .output()
             .ok()
             .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok())
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+            })
             .unwrap_or(1)
     };
 
     // Total memory in GiB
     let memory_gib = if cfg!(target_os = "macos") {
-        parse_sysctl_u64("hw.memsize")
-            .map_or(8, |bytes| (bytes / 1073741824) as u32)
+        parse_sysctl_u64("hw.memsize").map_or(8, |bytes| (bytes / 1073741824) as u32)
     } else {
         // Linux: /proc/meminfo
         std::fs::read_to_string("/proc/meminfo")
@@ -411,57 +525,67 @@ pub fn detect_host_specs() -> HostSpecs {
             .unwrap_or_default()
     };
 
-    HostSpecs {
+    Ok(HostSpecs {
         cpu_cores,
         memory_gib,
         disk_free_gib,
         disk_total_gib,
         arch,
         model,
-    }
+    })
 }
 
 /// Get host machine hardware specifications
 #[tauri::command]
 pub async fn host_specs() -> Result<HostSpecs, crate::error::ColimaError> {
     async move {
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio::task::spawn_blocking(detect_host_specs),
-    )
-    .await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(detect_host_specs),
+        )
+        .await;
 
-    match result {
-        Ok(Ok(specs)) => Ok(specs),
-        Ok(Err(e)) => Err(format!("Task join error: {}", e)),
-        Err(_) => Err("Host specs detection timed out".to_string()),
+        match result {
+            Ok(Ok(specs)) => specs,
+            Ok(Err(e)) => Err(format!("Task join error: {}", e)),
+            Err(_) => Err("Host specs detection timed out".to_string()),
+        }
     }
-
-    }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 /// Read the bundled CONTEXT.md file and return its contents.
 /// Used by the AI agent to inject authoritative ColimaUI + Colima knowledge
 /// into the chat context (Tier 1 injection).
 #[tauri::command]
-pub async fn read_reference(app: tauri::AppHandle, path: String) -> Result<String, crate::error::ColimaError> {
+pub async fn read_reference(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<String, crate::error::ColimaError> {
     async move {
-    use tauri::Manager;
-    let resource_path = app
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("Cannot resolve resource dir: {e}"))?
-        .join("resources")
-        .join(&path);
-    std::fs::read_to_string(&resource_path)
-        .map_err(|e| format!("Failed to read reference from {:?}: {e}", resource_path))
+        use tauri::Manager;
+        let resources_dir = app
+            .path()
+            .resource_dir()
+            .map_err(|e| format!("Cannot resolve resource dir: {e}"))?
+            .join("resources");
+        let resource_path = resources_dir.join(&path);
+        if cfg!(windows) {
+            crate::validation::assert_path_within(&resources_dir, &resource_path)?;
+        }
+        std::fs::read_to_string(&resource_path)
+            .map_err(|e| format!("Failed to read reference from {:?}: {e}", resource_path))
     }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 #[tauri::command]
 pub async fn get_app_context(app: tauri::AppHandle) -> Result<String, crate::error::ColimaError> {
+    if cfg!(windows) {
+        return Ok(include_str!("../../resources/windows_docker_assistant.md").into());
+    }
     async move {
     use tauri::Manager;
     let resources_dir = app
@@ -498,19 +622,19 @@ pub async fn get_app_context(app: tauri::AppHandle) -> Result<String, crate::err
     if let Ok(home) = app.path().home_dir() {
         let plugins_file = home.join(".colima-ui").join("plugins.yaml");
         if let Ok(content) = std::fs::read_to_string(&plugins_file) {
-            if let Ok(config) = serde_yml::from_str::<PluginsConfig>(&content) {
+            if let Ok(config) = serde_norway::from_str::<PluginsConfig>(&content) {
                 if !config.plugins.is_empty() {
                     context.push_str("## Custom User Plugins / Skills\n\n");
                     context.push_str("The user has defined the following custom skills/shortcuts in their `~/.colima-ui/plugins.yaml`. You MUST prioritize them when applicable.\n\n");
-                    
+
                     for (name, plugin) in config.plugins {
                         context.push_str(&format!("### {}\n", name));
                         context.push_str(&format!("- **Description**: {}\n", plugin.description));
-                        
+
                         if let Some(prompt) = plugin.prompt {
                             context.push_str(&format!("- **Prompt/Trigger**: {}\n", prompt));
                         }
-                        
+
                         if let Some(cmd) = plugin.command {
                             let parts: Vec<&str> = cmd.split_whitespace().collect();
                             if !parts.is_empty() {
@@ -536,30 +660,42 @@ pub async fn get_app_context(app: tauri::AppHandle) -> Result<String, crate::err
 }
 
 #[tauri::command]
-pub async fn set_resource_saver(     enabled: bool,     threshold: u64,     state: tauri::State<'_, Arc<RwLock<ResourceSaverState>>> ) -> Result<(), crate::error::ColimaError> {
+pub async fn set_resource_saver(
+    enabled: bool,
+    threshold: u64,
+    state: tauri::State<'_, Arc<RwLock<ResourceSaverState>>>,
+) -> Result<(), crate::error::ColimaError> {
     async move {
-    let mut s = state.write().await;
-    s.enabled = enabled;
-    s.idle_minutes_threshold = threshold;
-    s.idle_minutes_count = 0; // reset on setting change
-    Ok(())
+        crate::host_features::HostFeature::ManagedVms.require()?;
+        let mut s = state.write().await;
+        s.enabled = enabled;
+        s.idle_minutes_threshold = threshold;
+        s.idle_minutes_count = 0; // reset on setting change
+        Ok(())
     }
-    .await.map_err(|e: String| crate::error::ColimaError::from(e))
+    .await
+    .map_err(|e: String| crate::error::ColimaError::from(e))
 }
 
 pub fn start_resource_saver_daemon(state: Arc<RwLock<ResourceSaverState>>) {
+    // Windows engines belong to their provider; VM idle shutdown is unavailable.
+    if cfg!(windows) {
+        return;
+    }
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-            
+
             let mut s = state.write().await;
-            if !s.enabled { continue; }
-            
+            if !s.enabled {
+                continue;
+            }
+
             let resolved = crate::path_util::resolve_binary("docker");
             let mut cmd = std::process::Command::new(&resolved);
             cmd.args(["stats", "--no-stream", "--format", "{{.CPUPerc}}"]);
             crate::path_util::apply_path_to_cmd(&mut cmd);
-            
+
             let mut is_idle = true;
             if let Ok(output) = cmd.output() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -576,9 +712,9 @@ pub fn start_resource_saver_daemon(state: Arc<RwLock<ResourceSaverState>>) {
                 }
             } else {
                 // If docker fails, assume not idle to be safe, or assume colima is already off
-                is_idle = false; 
+                is_idle = false;
             }
-            
+
             if is_idle {
                 s.idle_minutes_count += 1;
                 if s.idle_minutes_count >= s.idle_minutes_threshold {

@@ -36,6 +36,8 @@ pub enum CapabilityState {
     Running,
     /// Detection failed (timed out, permission error).
     Unknown,
+    /// Installed or not, this feature is outside the native host contract.
+    Unsupported,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +100,14 @@ fn store(data: &[Capability]) {
 
 /// Install command for a tool on the current platform.
 fn install_hint(id: &str) -> Option<String> {
+    if cfg!(windows) {
+        return match id {
+            "docker" => Some("Install Docker Desktop or Rancher Desktop with Moby and Linux containers; make docker.exe available on PATH".into()),
+            "docker-compose" => Some("Enable the Docker Compose plugin in your existing engine installation".into()),
+            "trivy" => Some("Install the native Trivy executable and make it available on PATH".into()),
+            _ => None,
+        };
+    }
     let macos = cfg!(target_os = "macos");
     let hint = match (id, macos) {
         ("colima", true) => "brew install colima",
@@ -136,13 +146,61 @@ fn capability(id: &str, name: &str, state: CapabilityState, version: Option<Stri
         name: name.to_string(),
         state,
         version: version.map(|v| v.lines().next().unwrap_or("").trim().to_string()),
-        install_hint: matches!(state, CapabilityState::Missing).then(|| install_hint(id)).flatten(),
-        doc_id: doc_id(id),
+        install_hint: matches!(state, CapabilityState::Missing)
+            .then(|| install_hint(id))
+            .flatten(),
+        doc_id: if state == CapabilityState::Unsupported {
+            None
+        } else {
+            doc_id(id)
+        },
     }
 }
 
 /// Detect everything. Blocking — callers must run it off the async runtime.
 fn detect_all_blocking() -> Vec<Capability> {
+    #[cfg(windows)]
+    {
+        return detect_windows();
+    }
+    #[cfg(not(windows))]
+    {
+        detect_posix()
+    }
+}
+
+#[cfg(windows)]
+fn detect_windows() -> Vec<Capability> {
+    let version = get_version("docker", &["--version"]);
+    let docker_state = if crate::path_util::resolve_executable("docker").is_none() {
+        CapabilityState::Missing
+    } else {
+        match crate::engine_connection::active().and_then(|c| c.command()) {
+            Ok(_) => CapabilityState::Running,
+            Err(_) => CapabilityState::InstalledNotRunning,
+        }
+    };
+    let compose = get_version("docker", &["compose", "version"]);
+    let trivy = get_version("trivy", &["--version"]);
+    let plain = |v: &Option<String>| {
+        if v.is_some() {
+            CapabilityState::Running
+        } else {
+            CapabilityState::Missing
+        }
+    };
+    vec![
+        capability("docker", "Docker engine", docker_state, version),
+        capability("docker-compose", "Docker Compose", plain(&compose), compose),
+        capability("trivy", "Trivy", plain(&trivy), trivy),
+        capability("colima", "Colima", CapabilityState::Unsupported, None),
+        capability("lima", "Lima", CapabilityState::Unsupported, None),
+        capability("kubectl", "Kubernetes", CapabilityState::Unsupported, None),
+    ]
+}
+
+#[cfg(not(windows))]
+fn detect_posix() -> Vec<Capability> {
     // Colima: installed if the binary answers, running if any instance is up.
     let colima_version = get_version("colima", &["version"]);
     let colima_state = match &colima_version {
@@ -199,7 +257,12 @@ fn detect_all_blocking() -> Vec<Capability> {
             compose_version,
         ),
         capability("lima", "Lima", plain(&lima_version), lima_version),
-        capability("kubectl", "kubectl", plain(&kubectl_version), kubectl_version),
+        capability(
+            "kubectl",
+            "kubectl",
+            plain(&kubectl_version),
+            kubectl_version,
+        ),
         capability("trivy", "Trivy", plain(&trivy_version), trivy_version),
     ]
 }
@@ -215,7 +278,9 @@ pub async fn get_system_capabilities() -> Result<Vec<Capability>, crate::error::
     // critically, hold no lock while it runs.
     let detected = tokio::task::spawn_blocking(detect_all_blocking)
         .await
-        .map_err(|e| crate::error::ColimaError::internal(format!("Detection task failed: {}", e)))?;
+        .map_err(|e| {
+            crate::error::ColimaError::internal(format!("Detection task failed: {}", e))
+        })?;
 
     store(&detected);
     Ok(detected)
@@ -228,7 +293,7 @@ mod tests {
     #[test]
     fn missing_tools_carry_an_install_hint_but_present_ones_do_not() {
         let missing = capability("colima", "Colima", CapabilityState::Missing, None);
-        assert!(missing.install_hint.is_some());
+        assert_eq!(missing.install_hint.is_some(), !cfg!(windows));
 
         let running = capability(
             "colima",
@@ -250,7 +315,10 @@ mod tests {
             CapabilityState::Running,
             Some("Docker version 27.0.3, build 1a2b3c\nextra line\n".into()),
         );
-        assert_eq!(c.version.as_deref(), Some("Docker version 27.0.3, build 1a2b3c"));
+        assert_eq!(
+            c.version.as_deref(),
+            Some("Docker version 27.0.3, build 1a2b3c")
+        );
     }
 
     #[test]
@@ -268,7 +336,12 @@ mod tests {
 
     #[test]
     fn invalidate_clears_a_stored_result() {
-        store(&[capability("colima", "Colima", CapabilityState::Running, None)]);
+        store(&[capability(
+            "colima",
+            "Colima",
+            CapabilityState::Running,
+            None,
+        )]);
         assert!(cached().is_some());
         invalidate();
         assert!(cached().is_none(), "invalidate must force a re-detect");

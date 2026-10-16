@@ -1,0 +1,3 @@
+# Source/evidence identities stay reproducible across native Windows and POSIX.
+# Git's text detection leaves binary assets unchanged.
+* text=auto eol=lf

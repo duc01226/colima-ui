@@ -22,32 +22,45 @@ use tower_http::cors::CorsLayer;
 // Re-export everything from sub-modules for backward compatibility.
 // Existing `use crate::api_server::*;` in routes/ will still work.
 pub use crate::auth::*;
+pub use crate::helpers::*;
+pub use crate::platform::*;
 pub use crate::sse::*;
 pub use crate::validation::*;
-pub use crate::platform::*;
-pub use crate::helpers::*;
+
+static BOUND_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+/// Native SSE must use this instance, never whichever public health port wins.
+#[tauri::command]
+pub fn api_port() -> Result<u16, String> {
+    let port = BOUND_PORT.load(std::sync::atomic::Ordering::Acquire);
+    if (11420..=11429).contains(&port) {
+        Ok(port)
+    } else {
+        Err("This application's local API is not ready. Recheck shortly.".into())
+    }
+}
 
 // ===== Route Handler Imports =====
 
-use crate::routes::system::*;
-use crate::routes::instances::*;
-use crate::routes::containers::*;
-use crate::routes::images::*;
-use crate::routes::volumes::*;
-use crate::routes::networks::*;
-use crate::routes::topology::*;
-use crate::routes::file_transfer::*;
-use crate::routes::announcements::*;
-use crate::routes::security::*;
-use crate::routes::diagnostics::*;
-use crate::routes::compose::*;
-use crate::routes::capabilities::*;
-use crate::routes::models::*;
-use crate::routes::k8s::*;
-use crate::routes::lima::*;
 use crate::routes::ai::*;
+use crate::routes::announcements::*;
+use crate::routes::capabilities::*;
+use crate::routes::compose::*;
+use crate::routes::containers::*;
+use crate::routes::diagnostics::*;
+use crate::routes::file_transfer::*;
+use crate::routes::images::*;
+use crate::routes::instances::*;
+use crate::routes::k8s::*;
 use crate::routes::kb::*;
+use crate::routes::lima::*;
 use crate::routes::misc::*;
+use crate::routes::models::*;
+use crate::routes::networks::*;
+use crate::routes::security::*;
+use crate::routes::system::*;
+use crate::routes::topology::*;
+use crate::routes::volumes::*;
 
 /// Build the axum router with all API routes
 pub fn build_router() -> Router {
@@ -154,13 +167,34 @@ pub fn build_router() -> Router {
         // Live metrics: samples arrive on the SSE stream under the
         // `metrics.sample` topic; this only tunes the sampling period.
         .route("/api/metrics/interval", post(api_set_metrics_interval))
+        .route("/api/metrics/status", get(api_metrics_status))
         // Alert rules are the user's own configuration, so these write.
-        .route("/api/self-heal/rules", get(crate::routes::self_heal::api_self_heal_list_rules).post(crate::routes::self_heal::api_self_heal_save_rule))
-        .route("/api/self-heal/log", get(crate::routes::self_heal::api_self_heal_log))
-        .route("/api/self-heal/enabled", get(crate::routes::self_heal::api_self_heal_enabled).post(crate::routes::self_heal::api_self_heal_set_enabled))
-        .route("/api/activity", get(crate::routes::activity::api_activity_query))
-        .route("/api/activity/feed", get(crate::routes::activity::api_activity_feed))
-        .route("/api/activity/export", post(crate::routes::activity::api_activity_export))
+        .route(
+            "/api/self-heal/rules",
+            get(crate::routes::self_heal::api_self_heal_list_rules)
+                .post(crate::routes::self_heal::api_self_heal_save_rule),
+        )
+        .route(
+            "/api/self-heal/log",
+            get(crate::routes::self_heal::api_self_heal_log),
+        )
+        .route(
+            "/api/self-heal/enabled",
+            get(crate::routes::self_heal::api_self_heal_enabled)
+                .post(crate::routes::self_heal::api_self_heal_set_enabled),
+        )
+        .route(
+            "/api/activity",
+            get(crate::routes::activity::api_activity_query),
+        )
+        .route(
+            "/api/activity/feed",
+            get(crate::routes::activity::api_activity_feed),
+        )
+        .route(
+            "/api/activity/export",
+            post(crate::routes::activity::api_activity_export),
+        )
         // Diagnostics. Building a bundle sends nothing anywhere; the response
         // goes back to the caller, who decides what to do with it.
         .route("/api/diagnostics/bundle", post(api_diagnostic_bundle))
@@ -250,22 +284,52 @@ pub fn build_router() -> Router {
         .route("/api/ai/search", post(api_ai_search))
         .route("/api/ai/fetch-page", post(api_ai_fetch_page))
         .route("/api/ai/context", get(api_ai_context))
-        .route("/api/ai/history", get(api_ai_load_history).post(api_ai_save_message))
+        .route(
+            "/api/ai/history",
+            get(api_ai_load_history).post(api_ai_save_message),
+        )
         .route("/api/ai/history/clear", post(api_ai_clear_history))
-        .route("/api/ai/conversations", get(api_ai_list_conversations).post(api_ai_create_conversation))
-        .route("/api/ai/conversations/rename", post(api_ai_rename_conversation))
-        .route("/api/ai/conversations/delete", post(api_ai_delete_conversation))
+        .route(
+            "/api/ai/conversations",
+            get(api_ai_list_conversations).post(api_ai_create_conversation),
+        )
+        .route(
+            "/api/ai/conversations/rename",
+            post(api_ai_rename_conversation),
+        )
+        .route(
+            "/api/ai/conversations/delete",
+            post(api_ai_delete_conversation),
+        )
         // Settings
         .route("/api/settings", get(api_get_settings))
         .route("/api/settings", post(api_set_setting))
         // Colima config — colima.yaml is the single source of truth
-        .route("/api/instances/config", get(crate::routes::colima_config::api_get_colima_config))
-        .route("/api/instances/config/preview", post(crate::routes::colima_config::api_preview_colima_config))
-        .route("/api/instances/config/apply", post(crate::routes::colima_config::api_apply_colima_config))
+        .route(
+            "/api/instances/config",
+            get(crate::routes::colima_config::api_get_colima_config),
+        )
+        .route(
+            "/api/instances/config/preview",
+            post(crate::routes::colima_config::api_preview_colima_config),
+        )
+        .route(
+            "/api/instances/config/apply",
+            post(crate::routes::colima_config::api_apply_colima_config),
+        )
         // Help articles
-        .route("/api/kb/articles", get(crate::routes::colima_config::api_kb_list_articles))
-        .route("/api/kb/articles/get", get(crate::routes::colima_config::api_kb_get_article))
-        .route("/api/kb/articles/search", get(crate::routes::colima_config::api_kb_search_articles))
+        .route(
+            "/api/kb/articles",
+            get(crate::routes::colima_config::api_kb_list_articles),
+        )
+        .route(
+            "/api/kb/articles/get",
+            get(crate::routes::colima_config::api_kb_get_article),
+        )
+        .route(
+            "/api/kb/articles/search",
+            get(crate::routes::colima_config::api_kb_search_articles),
+        )
         // Knowledge Bank
         .route("/api/kb/query", post(api_kb_query))
         .route("/api/kb/feedback", post(api_kb_feedback))
@@ -275,7 +339,10 @@ pub fn build_router() -> Router {
         .route("/api/kb/memories/delete", post(api_kb_delete_memory))
         // Shell Sandbox
         .route("/api/sandbox/execute", post(api_sandbox_execute))
-        .route("/api/sandbox/execute-approved", post(api_sandbox_execute_approved))
+        .route(
+            "/api/sandbox/execute-approved",
+            post(api_sandbox_execute_approved),
+        )
         .route("/api/cli/execute_stream", post(api_sandbox_execute_stream))
         // Capabilities
         .route("/api/capabilities", get(api_capabilities))
@@ -285,6 +352,7 @@ pub fn build_router() -> Router {
         // commands now: a shell endpoint reachable on a local port is arbitrary
         // code execution, and the safest version of that endpoint is one that
         // does not exist. See plans/260811-0919-terminal-integration.
+        .layer(middleware::from_fn(crate::host_features::http_guard))
         .layer(middleware::from_fn(auth_middleware));
 
     // Unauthenticated routes. `/api/health` reports liveness and nothing else,
@@ -316,12 +384,8 @@ pub fn start_api_server() {
         tokio::spawn(sse_instance_publisher());
 
         // Fix #12: Try ports 11420-11429 as fallback when primary port is taken
-        // TODO(port-shadowing): a second instance silently lands on 11421+ here.
-        // The frontend port-scans so the webview is fine, but the `cui` CLI
-        // hardcodes 11420 (bin/cui.rs) and will talk to a stale first instance;
-        // a newer instance never rebinds 11420 when the holder exits. Consider
-        // notifying the user when bound_port != 11420 and re-scanning on failure
-        // of the holder.
+        // CLI discovery uses a private exact-instance reference published only
+        // after binding; a public health response is never credential identity.
         let mut listener_opt = None;
         let mut bound_port = 11420u16;
         'port_scan: for port in 11420..=11429 {
@@ -349,6 +413,10 @@ pub fn start_api_server() {
 
         match listener_opt {
             Some(listener) => {
+                BOUND_PORT.store(bound_port, std::sync::atomic::Ordering::Release);
+                if crate::api_reference::publish(bound_port, &get_api_token()).is_err() {
+                    eprintln!("[API Server] Private CLI reference unavailable; in-app access remains available");
+                }
                 println!("HTTP API server running on http://127.0.0.1:{}", bound_port);
 
                 // Browser mode needs the token out-of-band now that the public
@@ -383,6 +451,8 @@ pub fn start_api_server() {
                     }
                 };
                 cleanup.await;
+                BOUND_PORT.store(0, std::sync::atomic::Ordering::Release);
+                crate::api_reference::close();
             }
             None => {
                 eprintln!(
@@ -410,6 +480,74 @@ mod tests {
             .await
             .expect("router is infallible")
             .status()
+    }
+
+    // TC015/029: real router auth precedes host policy, which precedes unsupported
+    // query/body extraction and every raw command handler. Native Windows only.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_host_refusal_preserves_auth_and_docker_access() {
+        let auth = format!("Bearer {}", get_api_token());
+        for path in [
+            "/api/instances",
+            "/api/instances/config",
+            "/api/lima",
+            "/api/k8s/pods",
+            "/api/models",
+            "/api/diagnostics/logs",
+        ] {
+            assert_eq!(
+                status_of(path, None).await,
+                StatusCode::UNAUTHORIZED,
+                "{path}"
+            );
+            assert_eq!(
+                status_of(path, Some(&auth)).await,
+                StatusCode::NOT_IMPLEMENTED,
+                "{path}"
+            );
+        }
+        assert_eq!(status_of("/api/health", None).await, StatusCode::OK);
+        assert_eq!(
+            status_of("/api/system/platform", Some(&auth)).await,
+            StatusCode::OK
+        );
+    }
+
+    // TC015/016: stream transport is not an approval grant. The assertion
+    // names the policy refusal so a missing Docker installation cannot fake it.
+    #[tokio::test]
+    async fn command_stream_cannot_bypass_approval_or_bans() {
+        for (command, reason) in [
+            ("docker stop --help", "needs_approval"),
+            ("docker ps;whoami", "banned"),
+        ] {
+            let response = build_router()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/cli/execute_stream")
+                        .header("authorization", format!("Bearer {}", get_api_token()))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"command": command}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap();
+            let output = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(output.contains("event: error"), "{output}");
+            assert!(output.contains(reason), "policy reason missing: {output}");
+            assert!(
+                !output.contains("event: stdout") && !output.contains("event: exit"),
+                "{output}"
+            );
+        }
     }
 
     /// The whole point of the change this guards: no route hands out the token.
@@ -441,6 +579,37 @@ mod tests {
     #[tokio::test]
     async fn health_stays_public() {
         assert_eq!(status_of("/api/health", None).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn metrics_observation_requires_bearer_and_does_not_start_sampling() {
+        assert_eq!(
+            status_of("/api/metrics/status", None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        let query = format!("/api/metrics/status?token={}", get_api_token());
+        assert_eq!(status_of(&query, None).await, StatusCode::UNAUTHORIZED);
+        let before = crate::commands::metrics_collector::ticks_taken();
+        let response = build_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/metrics/status")
+                    .header("authorization", format!("Bearer {}", get_api_token()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["success"], true);
+        assert_eq!(body["data"]["processId"], std::process::id());
+        assert_eq!(body["data"]["startedTicks"], before);
+        assert!(body["data"]["recentTicks"].is_array());
+        assert_eq!(crate::commands::metrics_collector::ticks_taken(), before);
     }
 
     /// `/api/events` authenticates by `?token=` because `EventSource` cannot
@@ -497,7 +666,8 @@ mod tests {
         // dropped, and nobody told us.
         drop(res);
         assert_eq!(
-            subscriber_count(topic), 0,
+            subscriber_count(topic),
+            0,
             "the count outlived the client — this is the leak the guard prevents"
         );
     }
@@ -506,7 +676,10 @@ mod tests {
     /// Without this, deleting the auth layer would still pass the test above.
     #[tokio::test]
     async fn everything_else_requires_a_token() {
-        assert_eq!(status_of("/api/containers", None).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status_of("/api/containers", None).await,
+            StatusCode::UNAUTHORIZED
+        );
         assert_eq!(
             status_of("/api/containers", Some("Bearer not-the-real-token")).await,
             StatusCode::UNAUTHORIZED

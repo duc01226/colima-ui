@@ -28,10 +28,26 @@ use tauri::{AppHandle, Emitter};
 
 use crate::commands::activity;
 use crate::error::ColimaError;
-use crate::streaming_cmd::{run_streaming, OutputSink};
+use crate::streaming_cmd::{run_streaming_with_commit, OutputSink};
 use crate::transfer_registry as registry;
+use crate::validation::resolve_host_output;
 
 static JOB_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// All registered file producers share cancellation/publication/Success.
+/// Scratch metadata is obtained before rename, so no later metadata error can
+/// turn an already-published file into a fictional failure.
+pub(crate) fn publish_output(
+    job_id: &str,
+    partial: &Path,
+    destination: &Path,
+    overwrite: bool,
+) -> Result<Option<u64>, String> {
+    registry::commit_output(job_id, || {
+        crate::streaming_cmd::publish_file(partial, destination, overwrite)
+            .map_err(|e| format!("Cannot publish output: {e}"))
+    })
+}
 
 /// Floor for starting a copy out of a container.
 ///
@@ -66,7 +82,12 @@ fn emit(app: Option<&AppHandle>, event: &str, payload: serde_json::Value) {
     }
 }
 
-fn progress_event(job_id: &str, bytes: u64, total: Option<u64>, message: Option<&str>) -> serde_json::Value {
+fn progress_event(
+    job_id: &str,
+    bytes: u64,
+    total: Option<u64>,
+    message: Option<&str>,
+) -> serde_json::Value {
     serde_json::json!({
         "jobId": job_id,
         "bytes": bytes,
@@ -126,7 +147,9 @@ fn require_container_ref(container_id: &str) -> Result<(), String> {
 /// without guessing.
 fn require_archive_name(file_name: &str) -> Result<(), String> {
     let lower = file_name.to_ascii_lowercase();
-    for misleading in [".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".zip", ".gz", ".bz2", ".xz"] {
+    for misleading in [
+        ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".zip", ".gz", ".bz2", ".xz",
+    ] {
         if lower.ends_with(misleading) {
             return Err(format!(
                 "This writes an uncompressed archive, so {:?} would describe it wrongly. Use a name ending in .tar.",
@@ -135,10 +158,7 @@ fn require_archive_name(file_name: &str) -> Result<(), String> {
         }
     }
     if !lower.ends_with(".tar") {
-        return Err(format!(
-            "File name must end in .tar: {:?}",
-            file_name
-        ));
+        return Err(format!("File name must end in .tar: {:?}", file_name));
     }
     Ok(())
 }
@@ -168,7 +188,10 @@ fn sniff_tar(path: &Path) -> Result<(), String> {
         ));
     }
     if head.len() >= 4 && &head[0..4] == b"PK\x03\x04" {
-        return Err(format!("{} is a ZIP archive, not a TAR archive.", path.display()));
+        return Err(format!(
+            "{} is a ZIP archive, not a TAR archive.",
+            path.display()
+        ));
     }
     // POSIX ustar and GNU tar both carry this magic at offset 257.
     if head.len() >= 262 && &head[257..262] == b"ustar" {
@@ -176,7 +199,11 @@ fn sniff_tar(path: &Path) -> Result<(), String> {
     }
     // Pre-POSIX tars have no magic at all. A full block behind a `.tar` name is
     // accepted rather than rejecting an archive the runtime would have read fine.
-    if head.len() >= 512 && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("tar")) {
+    if head.len() >= 512
+        && path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("tar"))
+    {
         return Ok(());
     }
     Err(format!(
@@ -185,43 +212,14 @@ fn sniff_tar(path: &Path) -> Result<(), String> {
     ))
 }
 
-/// Resolve `dir` + `file_name` into a destination, refusing anything that escapes
-/// `dir` or would silently overwrite.
-fn resolve_destination(
-    dir: &str,
-    file_name: &str,
-    overwrite: bool,
-) -> Result<PathBuf, String> {
-    require_plain("Destination folder", dir)?;
-    require_plain("File name", file_name)?;
-
-    let base = Path::new(dir);
-    if !base.is_dir() {
-        return Err(format!("Destination folder does not exist: {}", dir));
-    }
-
-    let candidate = base.join(file_name);
-    // The base is the folder the user chose in the dialog, not the candidate's own
-    // parent — that is what makes `../` in the file name a rejection instead of a
-    // tautology.
-    crate::validation::assert_path_within(base, &candidate)?;
-
-    if candidate.exists() && !overwrite {
-        return Err(format!(
-            "{} already exists. Choose another name or confirm overwriting.",
-            candidate.display()
-        ));
-    }
-    Ok(candidate)
-}
-
 fn require_existing_file(label: &str, path: &str) -> Result<PathBuf, String> {
     require_plain(label, path)?;
     let p = PathBuf::from(path);
     if !p.is_file() {
         return Err(format!("{} is not a file: {}", label, path));
     }
-    Ok(p)
+    p.canonicalize()
+        .map_err(|e| format!("Cannot resolve {label}: {e}"))
 }
 
 // ===== Disk space =====
@@ -246,7 +244,13 @@ fn available_bytes(dir: &Path) -> Option<u64> {
             Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        crate::windows_host::disk_space(dir)
+            .ok()
+            .map(|space| space.0)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = dir;
         None
@@ -258,10 +262,11 @@ fn available_bytes(dir: &Path) -> Option<u64> {
 /// `docker save` writes uncompressed layers, so this is close but not exact —
 /// which is why it never becomes a hard total, only an estimate and a disk check.
 fn estimate_image_bytes(images: &[String]) -> Option<u64> {
-    let mut cmd = crate::commands::runtime::get_runtime_cmd();
+    let mut cmd = crate::commands::runtime::get_runtime_cmd().ok()?;
     cmd.args(["image", "inspect", "--format", "{{.Size}}"]);
     cmd.args(images);
-    let out = cmd.output().ok()?;
+    let out =
+        crate::child_process::capture(cmd, std::time::Duration::from_secs(5), 1024 * 1024).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -326,7 +331,7 @@ fn spawn_job(
     job_id: String,
     mut cmd: std::process::Command,
     args: Vec<String>,
-    sink_path: Option<PathBuf>,
+    sink_path: Option<(PathBuf, bool)>,
     total_estimate: Option<u64>,
     subject: TransferSubject,
 ) {
@@ -375,9 +380,10 @@ fn spawn_job(
         };
 
         let (sink, lines) = match sink_path {
-            Some(path) => (OutputSink::ToFile(path), None),
+            Some((path, true)) => (OutputSink::ToFile(path), None),
+            Some((path, false)) => (OutputSink::ToNewFile(path), None),
             None => {
-                let (tx, rx) = std::sync::mpsc::channel();
+                let (tx, rx) = std::sync::mpsc::sync_channel(64);
                 (OutputSink::ByLine(tx), Some(rx))
             }
         };
@@ -401,10 +407,58 @@ fn spawn_job(
             })
         });
 
-        let result = run_streaming(&job_id, cmd, "docker", sink, emit_progress);
+        // Windows preflight errors must still reach pump/registry cleanup below.
+        #[cfg_attr(not(windows), allow(clippy::redundant_closure_call))]
+        let result = (|| {
+            // A queued job retains its command, but must verify the original
+            // daemon again when it actually dispatches, after arbitrary waiting.
+            #[cfg(windows)]
+            {
+                let _ = crate::engine_connection::active()?.command()?;
+            }
+            run_streaming_with_commit(
+                &job_id,
+                cmd,
+                "docker",
+                sink,
+                emit_progress,
+                |partial, destination, overwrite| {
+                    publish_output(&job_id, partial, destination, overwrite)
+                },
+            )
+        })();
         if let Some(pump) = line_pump {
             let _ = pump.join();
         }
+        let result = if result.is_err() && registry::is_cancel_requested(&job_id) {
+            // A cancelled preflight/late-acquisition refusal is an owned cancel,
+            // rather than a fictional daemon error after shutdown killed probes.
+            Ok(crate::streaming_cmd::StreamOutcome {
+                bytes: 0,
+                cancelled: true,
+            })
+        } else {
+            result
+        };
+        let result = match result {
+            Ok(mut outcome) if !outcome.cancelled => {
+                match registry::complete(
+                    &job_id,
+                    registry::TransferStatus::Success,
+                    outcome.bytes,
+                    None,
+                ) {
+                    registry::TransferStatus::Success => Ok(outcome),
+                    registry::TransferStatus::Cancelled => {
+                        outcome.cancelled = true;
+                        outcome.bytes = 0;
+                        Ok(outcome)
+                    }
+                    _ => Err("Transfer could not retain its completion outcome".into()),
+                }
+            }
+            other => other,
+        };
 
         // `run_streaming` has returned, so a successful destination has already been
         // renamed into place. Settling here rather than when the child was reaped is
@@ -494,7 +548,13 @@ pub async fn image_save(
     file_name: String,
     overwrite: bool,
 ) -> Result<TransferStarted, ColimaError> {
-    Ok(start_image_save(Some(app), images, dest_dir, file_name, overwrite)?)
+    Ok(start_image_save(
+        Some(app),
+        images,
+        dest_dir,
+        file_name,
+        overwrite,
+    )?)
 }
 
 pub fn start_image_save(
@@ -511,7 +571,7 @@ pub fn start_image_save(
         require_plain("Image reference", image)?;
     }
     require_archive_name(&file_name)?;
-    let dest = resolve_destination(&dest_dir, &file_name, overwrite)?;
+    let dest = resolve_host_output(&dest_dir, &file_name, overwrite)?;
 
     let total_estimate = estimate_image_bytes(&images);
     // Refuse rather than fill the disk. The estimate can be off, so the message
@@ -527,6 +587,7 @@ pub fn start_image_save(
         }
     }
 
+    let command = crate::commands::runtime::get_runtime_cmd()?;
     let job_id = next_job_id("save");
     // Registered before the spawn below: `spawn_blocking` can fail and emit a
     // terminal event before this function has even returned the id.
@@ -548,9 +609,9 @@ pub fn start_image_save(
     spawn_job(
         app,
         job_id.clone(),
-        crate::commands::runtime::get_runtime_cmd(),
+        command,
         args,
-        Some(dest),
+        Some((dest, overwrite)),
         total_estimate,
         TransferSubject {
             verb: "save",
@@ -578,6 +639,7 @@ pub fn start_image_load(
     let path = require_existing_file("Archive", &tar_path)?;
     sniff_tar(&path)?;
 
+    let command = crate::commands::runtime::get_runtime_cmd()?;
     let job_id = next_job_id("load");
     registry::register(
         &job_id,
@@ -589,7 +651,7 @@ pub fn start_image_load(
     spawn_job(
         app,
         job_id.clone(),
-        crate::commands::runtime::get_runtime_cmd(),
+        command,
         vec![
             "load".to_string(),
             "-i".to_string(),
@@ -603,7 +665,11 @@ pub fn start_image_load(
             verb: "load",
             target_kind: "archive",
             target: path.to_string_lossy().to_string(),
-            target_name: path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+            target_name: path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
         },
     );
     Ok(TransferStarted {
@@ -641,12 +707,13 @@ pub fn start_copy_to_container(
     let source = require_existing_file("Source file", &host_path)?;
     require_plain("Container path", &container_path)?;
 
+    let command = crate::commands::runtime::get_runtime_cmd()?;
     let job_id = next_job_id("cp-in");
     registry::register(&job_id, "cp-in", &container_path, None, None)?;
     spawn_job(
         app,
         job_id.clone(),
-        crate::commands::runtime::get_runtime_cmd(),
+        command,
         vec![
             "cp".to_string(),
             "--".to_string(),
@@ -700,7 +767,7 @@ pub fn start_copy_from_container(
     require_container_ref(&container_id)?;
     require_plain("Container path", &container_path)?;
     require_archive_name(&file_name)?;
-    let dest = resolve_destination(&dest_dir, &file_name, overwrite)?;
+    let dest = resolve_host_output(&dest_dir, &file_name, overwrite)?;
 
     // No total is knowable — the runtime reports none and the source is inside the
     // container — so this is a floor rather than a fit: refuse to start a stream
@@ -717,12 +784,13 @@ pub fn start_copy_from_container(
         }
     }
 
+    let command = crate::commands::runtime::get_runtime_cmd()?;
     let job_id = next_job_id("cp-out");
     registry::register(&job_id, "cp-out", &container_path, None, Some(dest.clone()))?;
     spawn_job(
         app,
         job_id.clone(),
-        crate::commands::runtime::get_runtime_cmd(),
+        command,
         vec![
             "cp".to_string(),
             "--".to_string(),
@@ -734,7 +802,7 @@ pub fn start_copy_from_container(
             // archive for both cases removes that whole branch.
             "-".to_string(),
         ],
-        Some(dest),
+        Some((dest, overwrite)),
         None,
         TransferSubject {
             verb: "copy-out",
@@ -756,7 +824,7 @@ pub fn start_copy_from_container(
 /// drained when the app exits.
 #[tauri::command]
 pub async fn cancel_transfer(job_id: String) -> Result<registry::CancelOutcome, ColimaError> {
-    Ok(cancel_transfer_job(&job_id))
+    try_cancel_transfer_job(&job_id).map_err(Into::into)
 }
 
 /// Ask a transfer to stop, and say what was actually there.
@@ -766,15 +834,61 @@ pub async fn cancel_transfer(job_id: String) -> Result<registry::CancelOutcome, 
 /// reports as an indistinguishable `false` — while `cancel_stream` is what kills the
 /// process. Recording intent first also covers a job that is registered but whose
 /// child has not been spawned yet; `spawn_job` checks for it.
+/// Quit/restart is a settlement boundary, not just a signal. Cancel accepted
+/// queued jobs too, then wait for consumer cleanup and publication outcomes.
+pub fn shutdown_transfers(timeout: std::time::Duration) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    registry::begin_shutdown(true)?;
+    for job in registry::list()
+        .into_iter()
+        .filter(|job| !job.status.is_terminal())
+    {
+        // A completed child may already be publishing output. It remains
+        // owned and blocks exit until settled, without blocking this deadline.
+        let _ = try_cancel_transfer_job(&job.job_id);
+    }
+    crate::streaming_cmd::shutdown_streams();
+    crate::child_process::shutdown_children();
+    loop {
+        if registry::list().iter().all(|job| job.status.is_terminal())
+            && crate::streaming_cmd::active_stream_count() == 0
+            && crate::child_process::active_child_count() == 0
+        {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("Transfer cleanup has not finished. Wait and quit again.".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 pub fn cancel_transfer_job(job_id: &str) -> registry::CancelOutcome {
     let outcome = registry::request_cancel(job_id);
     if outcome == registry::CancelOutcome::Cancelled {
         // `arm_cancel`, not `cancel_stream`: the child may not exist yet, and a
         // plain cancel would be dropped in that gap. Arming makes the kill happen
         // as soon as the child registers.
-        crate::streaming_cmd::arm_cancel(job_id);
+        deliver_accepted_cancel(job_id);
     }
     outcome
+}
+
+pub(crate) fn try_cancel_transfer_job(job_id: &str) -> Result<registry::CancelOutcome, String> {
+    let outcome = registry::try_request_cancel(job_id)?;
+    if outcome == registry::CancelOutcome::Cancelled {
+        deliver_accepted_cancel(job_id);
+    }
+    Ok(outcome)
+}
+
+fn deliver_accepted_cancel(job_id: &str) {
+    crate::streaming_cmd::arm_cancel(job_id);
+    // Completion may have settled/disarmed while the accepted caller was
+    // preempted. If still unfinished, completion's later disarm will win.
+    if !registry::is_unfinished(job_id) {
+        crate::streaming_cmd::disarm_cancel(job_id);
+    }
 }
 
 /// Every transfer this process knows about: unfinished, plus recent outcomes.
@@ -802,6 +916,127 @@ fn human_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cancellation_at_file_publication_preserves_prior_bytes_and_truthful_outcome() {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "commands::file_transfer::tests::publication_fixture",
+            "--ignored",
+            "--nocapture",
+        ]);
+        let output =
+            crate::child_process::capture(command, std::time::Duration::from_secs(10), 1024 * 1024)
+                .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("PUBLICATION-BOUNDARY-OK"));
+    }
+
+    #[test]
+    #[ignore = "isolated real output/registry publication fixture"]
+    fn publication_fixture() {
+        for cancel in [true, false] {
+            let directory = TempDir::new("publication");
+            let path = directory.path().join("prior.txt");
+            std::fs::write(&path, b"prior bytes").unwrap();
+            let id = if cancel {
+                "cancel-at-commit"
+            } else {
+                "successful-commit"
+            };
+            registry::register(id, "save", "fixture", None, Some(path.clone())).unwrap();
+            assert!(registry::set_running(id));
+            let mut command = crate::helpers::build_cmd("node", &[]).unwrap();
+            command
+                .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/process.mjs"))
+                .arg("hello");
+            let outcome = crate::streaming_cmd::run_streaming_with_commit(
+                id,
+                command,
+                "node",
+                OutputSink::ToFile(path.clone()),
+                |_| {},
+                |partial, destination, overwrite| {
+                    // Exact reachable preemption: feature cancellation is accepted
+                    // after the generic final read, before its kill is delivered.
+                    if cancel {
+                        assert_eq!(
+                            registry::request_cancel(id),
+                            registry::CancelOutcome::Cancelled
+                        );
+                    }
+                    publish_output(id, partial, destination, overwrite)
+                },
+            )
+            .unwrap();
+            assert_eq!(outcome.cancelled, cancel);
+            let expected = if cancel {
+                &b"prior bytes"[..]
+            } else {
+                &b"hello world"[..]
+            };
+            assert_eq!(std::fs::read(&path).unwrap(), expected);
+            let status = registry::complete(
+                id,
+                if outcome.cancelled {
+                    registry::TransferStatus::Cancelled
+                } else {
+                    registry::TransferStatus::Success
+                },
+                outcome.bytes,
+                None,
+            );
+            assert_eq!(
+                status,
+                if cancel {
+                    registry::TransferStatus::Cancelled
+                } else {
+                    registry::TransferStatus::Success
+                }
+            );
+            assert_eq!(
+                registry::request_cancel(id),
+                registry::CancelOutcome::AlreadyFinished
+            );
+            assert_eq!(crate::streaming_cmd::active_stream_count(), 0);
+            assert!(!crate::streaming_cmd::partial_sink_path(&path, id).exists());
+        }
+        let directory = TempDir::new("late-cancel");
+        let id = "late-accepted-delivery";
+        registry::register(id, "save", "fixture", None, None).unwrap();
+        assert_eq!(
+            registry::request_cancel(id),
+            registry::CancelOutcome::Cancelled
+        );
+        registry::settle(id, registry::TransferStatus::Cancelled, 0, None);
+        crate::streaming_cmd::disarm_cancel(id);
+        deliver_accepted_cancel(id);
+        let path = directory.path().join("new-generic-run.txt");
+        let mut command = crate::helpers::build_cmd("node", &[]).unwrap();
+        command
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/process.mjs"))
+            .arg("hello");
+        let outcome = crate::streaming_cmd::run_streaming(
+            id,
+            command,
+            "node",
+            OutputSink::ToNewFile(path.clone()),
+            |_| {},
+        )
+        .unwrap();
+        assert!(
+            !outcome.cancelled,
+            "late accepted delivery leaked an armed cancel after settlement"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"hello world");
+        println!("PUBLICATION-BOUNDARY-OK");
+    }
+
     /// A scratch directory that removes itself.
     ///
     /// `Drop` rather than a call at the end of each test: a failing assertion
@@ -813,14 +1048,17 @@ mod tests {
 
     impl TempDir {
         fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "colimaui-transfer-{}-{:?}",
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp");
+            std::fs::create_dir_all(&parent).unwrap();
+            let dir = parent.join(format!(
+                "colimaui-transfer-{}-{}-{}",
                 tag,
-                std::thread::current().id()
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
             ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
+            std::fs::create_dir(&dir).unwrap();
+            Self(dir.canonicalize().unwrap())
         }
 
         fn path(&self) -> &Path {
@@ -841,15 +1079,23 @@ mod tests {
     #[test]
     fn traversal_in_the_file_name_is_rejected() {
         let dir = TempDir::new("traversal");
-        let err = resolve_destination(dir.str(), "../escaped.tar", false)
+        let outside = dir.path().with_extension("escaped.tar");
+        assert!(!outside.exists());
+        let input = format!("../{}", outside.file_name().unwrap().to_str().unwrap());
+        let err = resolve_host_output(dir.str(), &input, false)
             .expect_err("must not escape the chosen folder");
-        assert!(err.contains("escapes"), "unexpected error: {}", err);
+        assert!(
+            err.contains("file name within the selected folder"),
+            "unexpected error: {}",
+            err
+        );
+        assert!(!outside.exists());
     }
 
     #[test]
     fn nested_traversal_is_rejected_too() {
         let dir = TempDir::new("traversal-deep");
-        let err = resolve_destination(dir.str(), "../../etc/passwd", false)
+        let err = resolve_host_output(dir.str(), "../../etc/passwd", false)
             .expect_err("must not escape the chosen folder");
         assert!(!err.is_empty());
     }
@@ -857,7 +1103,7 @@ mod tests {
     #[test]
     fn a_plain_file_name_resolves_inside_the_chosen_folder() {
         let dir = TempDir::new("plain");
-        let dest = resolve_destination(dir.str(), "images.tar", false).unwrap();
+        let dest = resolve_host_output(dir.str(), "images.tar", false).unwrap();
         assert_eq!(dest, dir.path().join("images.tar"));
     }
 
@@ -867,19 +1113,19 @@ mod tests {
         let existing = dir.path().join("taken.tar");
         std::fs::write(&existing, b"old").unwrap();
 
-        let err = resolve_destination(dir.str(), "taken.tar", false)
+        let err = resolve_host_output(dir.str(), "taken.tar", false)
             .expect_err("must not clobber silently");
         assert!(err.contains("already exists"), "unexpected error: {}", err);
 
         // With consent it resolves, and the old file is still there for the
         // command to replace.
-        assert!(resolve_destination(dir.str(), "taken.tar", true).is_ok());
+        assert!(resolve_host_output(dir.str(), "taken.tar", true).is_ok());
         assert!(existing.exists());
     }
 
     #[test]
     fn missing_destination_folder_is_rejected() {
-        let err = resolve_destination("/no/such/folder/anywhere", "x.tar", false)
+        let err = resolve_host_output("/no/such/folder/anywhere", "x.tar", false)
             .expect_err("must reject a folder that is not there");
         assert!(err.contains("does not exist"), "unexpected error: {}", err);
     }
@@ -998,7 +1244,11 @@ mod tests {
         // `is_valid_container_id` allows `-` because it is legal inside a name; a
         // *leading* one would change what the runtime reads the argument as.
         let err = require_container_ref("--rm").expect_err("must reject a flag-like id");
-        assert!(err.contains("must not start with '-'"), "unexpected: {}", err);
+        assert!(
+            err.contains("must not start with '-'"),
+            "unexpected: {}",
+            err
+        );
         assert!(require_container_ref("my-container").is_ok());
     }
 

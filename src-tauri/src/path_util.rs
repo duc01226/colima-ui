@@ -1,8 +1,11 @@
 use std::env;
+use std::ffi::{OsStr, OsString};
+use std::io;
 use std::path::PathBuf;
 use std::process::Command;
 
 /// Common binary search paths on macOS, Linux, and Windows
+#[cfg(not(windows))]
 const EXTRA_PATHS: &[&str] = &[
     "/usr/local/bin",
     "/opt/homebrew/bin",
@@ -20,6 +23,7 @@ const EXTRA_PATHS: &[&str] = &[
 ];
 
 /// Nix user-level paths that need $HOME expansion
+#[cfg(not(windows))]
 const NIX_USER_PATHS: &[&str] = &[
     ".nix-profile/bin",
     ".local/state/nix/profiles/profile/bin",
@@ -27,6 +31,7 @@ const NIX_USER_PATHS: &[&str] = &[
 ];
 
 /// Version manager / user-local paths that need $HOME expansion
+#[cfg(not(windows))]
 const USER_PATHS: &[&str] = &[
     // asdf version manager (manages node, kubectl, helm, etc.)
     ".asdf/shims",
@@ -44,7 +49,7 @@ const USER_PATHS: &[&str] = &[
 ];
 
 /// The computed PATH, stored for use by `apply_path_to_cmd()` in late-spawned contexts.
-static COMPUTED_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static COMPUTED_PATH: std::sync::OnceLock<OsString> = std::sync::OnceLock::new();
 
 /// `~/.colima-ui` — where this app keeps everything it writes.
 ///
@@ -63,11 +68,25 @@ static COMPUTED_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// no `HOME` is not a normal desktop session, and losing the knowledge bank
 /// there is better than refusing to start.
 pub fn app_data_dir() -> PathBuf {
-    let home = env::var("HOME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "/tmp".to_string());
-    PathBuf::from(home).join(".colima-ui")
+    try_app_data_dir().expect("Cannot resolve ColimaUI user data directory")
+}
+
+/// Windows uses the native per-user Known Folder. Startup checks this before
+/// opening storage. POSIX retains its existing HOME/.colima-ui location.
+pub fn try_app_data_dir() -> io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        crate::windows_host::app_data_dir()
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(posix_app_data_dir(env::var_os("HOME").as_deref()))
+    }
+}
+
+#[cfg(not(windows))]
+fn posix_app_data_dir(home: Option<&OsStr>) -> PathBuf {
+    PathBuf::from(home.filter(|h| !h.is_empty()).unwrap_or(OsStr::new("/tmp"))).join(".colima-ui")
 }
 
 /// Ensure common binary paths are in the PATH environment variable.
@@ -80,56 +99,55 @@ pub fn app_data_dir() -> PathBuf {
 /// It MUST be called from `main()` before `tauri::Builder::default()` (which spawns
 /// the tokio runtime and other threads).
 pub fn fix_path_env() {
-    let current_path = env::var("PATH").unwrap_or_default();
-    let mut paths: Vec<String> = current_path.split(':').map(|s| s.to_string()).collect();
+    let current_path = env::var_os("PATH").unwrap_or_default();
+    let mut paths: Vec<PathBuf> = env::split_paths(&current_path).collect();
 
-    for extra in EXTRA_PATHS {
-        let extra_str = extra.to_string();
-        if !paths.contains(&extra_str) && PathBuf::from(extra).exists() {
-            paths.push(extra_str);
+    #[cfg(not(windows))]
+    {
+        for extra in EXTRA_PATHS {
+            append_existing_path(&mut paths, PathBuf::from(extra));
         }
-    }
 
-    // Add Nix user-level paths (need $HOME expansion)
-    if let Ok(home) = env::var("HOME") {
-        for rel in NIX_USER_PATHS {
-            let full = format!("{}/{}", home, rel);
-            if !paths.contains(&full) && PathBuf::from(&full).exists() {
-                paths.push(full);
+        // Add Nix user-level paths (need $HOME expansion)
+        if let Some(home) = env::var_os("HOME").filter(|h| !h.is_empty()) {
+            for rel in NIX_USER_PATHS {
+                append_existing_path(&mut paths, PathBuf::from(&home).join(rel));
+            }
+
+            // Add version-manager and user-local paths (asdf, cargo, go, etc.)
+            for rel in USER_PATHS {
+                append_existing_path(&mut paths, PathBuf::from(&home).join(rel));
             }
         }
 
-        // Add version-manager and user-local paths (asdf, cargo, go, etc.)
-        for rel in USER_PATHS {
-            let full = format!("{}/{}", home, rel);
-            if !paths.contains(&full) && PathBuf::from(&full).exists() {
-                paths.push(full);
-            }
-        }
-    }
-
-    // Try to load user's shell PATH via login shell
-    // Use zsh (macOS default) first, then fall back to sh
-    let shell_cmds = [
-        ("/bin/zsh", &["-l", "-c", "echo $PATH"][..]),
-        ("/bin/sh", &["-l", "-c", "echo $PATH"][..]),
-    ];
-    for (shell, args) in &shell_cmds {
-        if let Ok(output) = Command::new(shell).args(*args).output() {
-            if output.status.success() {
-                let shell_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                for p in shell_path.split(':') {
-                    let ps = p.to_string();
-                    if !ps.is_empty() && !paths.contains(&ps) {
-                        paths.push(ps);
+        // Try to load user's shell PATH via login shell
+        // Use zsh (macOS default) first, then fall back to sh
+        let shell_cmds = [
+            ("/bin/zsh", &["-l", "-c", "echo $PATH"][..]),
+            ("/bin/sh", &["-l", "-c", "echo $PATH"][..]),
+        ];
+        for (shell, args) in &shell_cmds {
+            if let Ok(output) = Command::new(shell).args(*args).output() {
+                if output.status.success() {
+                    let shell_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    for p in env::split_paths(&shell_path) {
+                        if !p.as_os_str().is_empty() && !paths.contains(&p) {
+                            paths.push(p);
+                        }
                     }
+                    break; // Use the first successful shell
                 }
-                break; // Use the first successful shell
             }
         }
     }
+    #[cfg(windows)]
+    if let Ok(profile) = crate::windows_host::profile_dir() {
+        append_existing_path(&mut paths, profile.join(".rd").join("bin"));
+    }
 
-    let new_path = paths.join(":");
+    // These entries originated in PATH or existing directories, so each is a
+    // native path component. Do not silently publish a truncated PATH.
+    let new_path = env::join_paths(paths).expect("Invalid native PATH component");
 
     // Store for per-Command application in late-spawned threads
     let _ = COMPUTED_PATH.set(new_path.clone());
@@ -151,6 +169,12 @@ pub fn fix_path_env() {
     unsafe { env::set_var("PATH", &new_path) };
 }
 
+fn append_existing_path(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if candidate.is_dir() && !paths.contains(&candidate) {
+        paths.push(candidate);
+    }
+}
+
 /// Apply the computed PATH to a Command. Use this in contexts where the global
 /// env may not have been inherited (e.g., spawned after fix_path_env).
 #[allow(dead_code)]
@@ -163,26 +187,82 @@ pub fn apply_path_to_cmd(cmd: &mut Command) {
 /// Resolve the full path for a binary by checking PATH
 #[allow(dead_code)]
 pub fn resolve_binary(name: &str) -> String {
-    // First check if the binary can be found via `which`
-    if let Ok(output) = Command::new("/usr/bin/which").arg(name).output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return path;
+    #[cfg(windows)]
+    {
+        resolve_executable(name)
+            .map_or_else(|| name.to_string(), |p| p.to_string_lossy().into_owned())
+    }
+    #[cfg(not(windows))]
+    {
+        // First check if the binary can be found via `which`
+        if let Ok(output) = Command::new("/usr/bin/which").arg(name).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return path;
+                }
             }
         }
-    }
 
-    // Fall back to common locations
-    for dir in EXTRA_PATHS {
-        let candidate = PathBuf::from(dir).join(name);
-        if candidate.exists() {
-            return candidate.to_string_lossy().to_string();
+        // Fall back to common locations
+        for dir in EXTRA_PATHS {
+            let candidate = PathBuf::from(dir).join(name);
+            if candidate.exists() {
+                return candidate.to_string_lossy().to_string();
+            }
         }
-    }
 
-    // Last resort: just use the name and hope PATH has it
-    name.to_string()
+        // Last resort: just use the name and hope PATH has it
+        name.to_string()
+    }
+}
+
+/// Shared by the desktop and standalone Windows CLI without mutating a running
+/// async process's environment. Rancher's user bin is an actual second search
+/// source, including when the CLI was launched outside the desktop bootstrap.
+#[cfg(windows)]
+pub fn resolve_executable(name: &str) -> Option<PathBuf> {
+    let path = COMPUTED_PATH
+        .get()
+        .cloned()
+        .or_else(|| env::var_os("PATH"))
+        .unwrap_or_default();
+    let mut paths: Vec<PathBuf> = env::split_paths(&path).collect();
+    if let Ok(profile) = crate::windows_host::profile_dir() {
+        append_existing_path(&mut paths, profile.join(".rd").join("bin"));
+    }
+    find_executable(name, Some(&env::join_paths(paths).ok()?))
+}
+
+/// Resolve a native executable without a shell, PATHEXT scripts, or a current
+/// directory search. The connection owner retains this PathBuf losslessly.
+#[cfg(windows)]
+pub fn find_executable(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+    let requested = PathBuf::from(name);
+    let file = if requested.extension().is_some() {
+        requested
+    } else {
+        requested.with_extension("exe")
+    };
+    if !file
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+    {
+        return None;
+    }
+    if file.is_absolute() {
+        return file.is_file().then(|| file.canonicalize().ok()).flatten();
+    }
+    if file.components().count() != 1 {
+        return None;
+    }
+    env::split_paths(path?)
+        .filter(|p| p.is_absolute())
+        .map(|p| p.join(&file))
+        .find(|p| p.is_file())?
+        .canonicalize()
+        .ok()
 }
 
 /// Detect the Docker socket from a running Colima instance.
@@ -192,6 +272,16 @@ pub fn resolve_binary(name: &str) -> String {
 /// 1. DOCKER_HOST env var is NOT inherited from the user's shell
 /// 2. Colima doesn't create /var/run/docker.sock (no root access)
 /// 3. Bollard's connect_with_defaults() only checks /var/run/docker.sock
+#[cfg(windows)]
+pub fn detect_docker_host() -> Option<(String, String)> {
+    let connection = crate::engine_connection::active().ok()?;
+    Some((
+        connection.target().endpoint().to_string(),
+        connection.target().context().to_string(),
+    ))
+}
+
+#[cfg(not(windows))]
 pub fn detect_docker_host() -> Option<(String, String)> {
     if let Ok(host) = std::env::var("DOCKER_HOST") {
         if !host.is_empty() {
@@ -237,8 +327,57 @@ pub fn detect_docker_host() -> Option<(String, String)> {
     // running.
     let fallback = colima_path.join("docker.sock");
     if fallback.exists() {
-        return Some((format!("unix://{}", fallback.display()), "default".to_string()));
+        return Some((
+            format!("unix://{}", fallback.display()),
+            "default".to_string(),
+        ));
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // TC-WINUI-001/020: native separators preserve names, and supported POSIX
+    // data must not move when another OS is added.
+    #[test]
+    fn native_path_round_trip_preserves_spaces_unicode_and_order() {
+        let paths = [PathBuf::from("tools with spaces"), PathBuf::from("工具")];
+        let joined = env::join_paths(&paths).unwrap();
+        assert_eq!(env::split_paths(&joined).collect::<Vec<_>>(), paths);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn missing_or_empty_home_retains_posix_data_location() {
+        assert_eq!(posix_app_data_dir(None), PathBuf::from("/tmp/.colima-ui"));
+        assert_eq!(
+            posix_app_data_dir(Some(OsStr::new(""))),
+            PathBuf::from("/tmp/.colima-ui")
+        );
+        assert_eq!(
+            posix_app_data_dir(Some(OsStr::new("/Users/工具 space"))),
+            PathBuf::from("/Users/工具 space/.colima-ui")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_absolute_search_directories_and_exe_files_can_resolve() {
+        let root = env::temp_dir().join(format!("colimaui-path-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("native.exe"), b"fixture").unwrap();
+        std::fs::write(root.join("shell.cmd"), b"fixture").unwrap();
+        let path = env::join_paths([&root]).unwrap();
+        assert_eq!(
+            find_executable("native", Some(&path)),
+            Some(root.join("native.exe").canonicalize().unwrap())
+        );
+        assert!(find_executable("shell.cmd", Some(&path)).is_none());
+        assert!(find_executable("..\\native", Some(&path)).is_none());
+        assert!(find_executable("native", Some(OsStr::new("."))).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

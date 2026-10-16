@@ -1,4 +1,8 @@
 <script lang="ts">
+  import { tick } from "svelte";
+  import EngineConnectionSettings from "../components/settings/EngineConnectionSettings.svelte";
+  import { isDockerOnlyHost, supportsHostVms } from "../store/capabilities.svelte";
+  import { uiState } from "../store.svelte";
   import { type SystemInfo } from "../lib/api";
   import { setLanguage, getLanguage, t } from "../lib/i18n.svelte";
   import AIPanelSettings from "../components/settings/AIPanelSettings.svelte";
@@ -12,12 +16,21 @@
 
   let { systemInfo } = $props<{ systemInfo: SystemInfo | null }>();
 
+  let engineSection: HTMLDivElement | null = $state(null);
+  $effect(() => {
+    if (uiState.settingsSection === "engine" && engineSection) {
+      uiState.settingsSection = null;
+      const target = engineSection;
+      void tick().then(() => { target.scrollIntoView({ block: "start" }); target.querySelector<HTMLElement>("h2")?.focus(); });
+    }
+  });
+
   // Fix: use version string presence as fallback for installed status in case backend boolean is unreliable
   const deps = $derived([
     { name: "Colima", desc: "Container runtime manager", installed: systemInfo?.colima_installed === true || !!(systemInfo?.colima_version), version: systemInfo?.colima_version },
     { name: "Docker", desc: "Container engine client", installed: systemInfo?.docker_installed === true || !!(systemInfo?.docker_version), version: systemInfo?.docker_version },
     { name: "Lima", desc: "Linux virtual machine manager", installed: systemInfo?.lima_installed === true || !!(systemInfo?.lima_version), version: systemInfo?.lima_version },
-  ]);
+  ].filter((dep) => supportsHostVms() || dep.name === "Docker"));
 </script>
 
 <div class="content-header" data-tauri-drag-region>
@@ -30,6 +43,13 @@
 <div class="content-body">
   <div style="max-width: 800px; padding-bottom: 60px;">
   
+    {#if isDockerOnlyHost()}
+      <SettingsSection title={t("connection.title")} icon="Container" bind:el={engineSection}>
+        <h2 class="engine-heading" tabindex="-1">{t("connection.settings")}</h2>
+        <EngineConnectionSettings id="settings-engine" />
+      </SettingsSection>
+    {/if}
+
     <!-- Appearance Settings -->
     <SettingsSection title={t('settings.appearance', { default: 'Appearance' })} icon="Settings">
       <div style="display: flex; flex-direction: column; gap: 16px;">
@@ -74,12 +94,12 @@
     </div>
   </SettingsSection>
 
-  <ColimaConfig />
+  {#if supportsHostVms()}<ColimaConfig />{/if}
   <TraySettings />
 
   <NotificationSettings />
   <SelfHealing />
-  <ResourceSaverSettings />
+  {#if supportsHostVms()}<ResourceSaverSettings />{/if}
   <AIPanelSettings />
   <UpdateSettings />
 
@@ -120,3 +140,8 @@
   </SettingsSection>
   </div>
 </div>
+
+<style>
+  .engine-heading { font-size: var(--text-base); margin: 0 0 12px; }
+  .engine-heading:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+</style>

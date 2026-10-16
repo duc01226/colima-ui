@@ -1,0 +1,20 @@
+# Project-local policy takes precedence over personal ignore/target settings.
+# Existing debt is itemized by the scoped Windows quality ratchet, not hidden
+# from the audit output. Fetch failure/stale data cannot establish PASS.
+[advisories]
+ignore = []
+informational_warnings = ["unmaintained", "unsound", "notice"]
+severity_threshold = "none"
+
+[database]
+url = "https://github.com/RustSec/advisory-db.git"
+fetch = true
+stale = false
+
+[output]
+format = "json"
+quiet = false
+
+[yanked]
+enabled = true
+update_index = true

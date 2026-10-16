@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { pageAvailable, isDockerOnlyHost } from "../store/capabilities.svelte";
+  import { engineConnectionState } from "../lib/engineConnection.svelte";
   import { onMount } from "svelte";
   import * as Icons from "./Icons.svelte";
   import { uiState } from "../store.svelte";
@@ -98,7 +100,7 @@
         // list past the viewport so Dashboard scrolled under the header.
       ],
     },
-  ]);
+  ].map((group) => ({ ...group, items: group.items.filter((item) => pageAvailable(item.id)) })).filter((group) => group.items.length > 0));
 
   /**
    * Colima status for the footer.
@@ -109,6 +111,17 @@
    * so this reads the polled instance list too.
    */
   const colimaStatus = $derived.by(() => {
+    if (isDockerOnlyHost()) {
+      const state = engineConnectionState;
+      const engine = state.snapshot?.active.context ?? "Docker";
+      return {
+        tone: state.snapshot?.active.ready ? "on" as const : "off" as const,
+        label: engine,
+        detail: state.loading ? t("connection.loading") : state.snapshot?.active.ready ? t("connection.connected", { engine }) : t("connection.unavailable", { engine }),
+        target: "settings",
+      };
+    }
+
     const version = systemInfo?.colima_version
       ? `v${systemInfo.colima_version.split("\n")[0].replace(/.*version\s*/i, "")}`
       : null;
@@ -443,7 +456,8 @@
          user something was wrong and gave them nowhere to go. -->
     <button
       class="footer-status footer-status-{colimaStatus.tone}"
-      onclick={() => (uiState.currentPage = colimaStatus.target)}
+      onclick={() => { if (isDockerOnlyHost()) uiState.settingsSection = "engine"; uiState.currentPage = colimaStatus.target; }}
+      aria-label={`${colimaStatus.label}. ${colimaStatus.detail}. ${t("connection.settings")}`}
       title="{colimaStatus.label} — {colimaStatus.detail}"
     >
       <span class="footer-dot" aria-hidden="true"></span>

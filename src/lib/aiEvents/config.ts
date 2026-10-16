@@ -2,7 +2,7 @@ import { isRunningInTauri } from "../env";
 import { runSandboxed } from "./shell";
 import { EventHandler } from "./types";
 import { modelsApi } from "../api";
-import { getActiveProvider } from "../aiProviderConfig";
+import { DEFAULT_PROVIDER, findProvider, getActiveProvider } from "../aiProviderConfig";
 
 export const configRegistry: Record<string, EventHandler> = {
   "model-list": {
@@ -46,12 +46,28 @@ export const configRegistry: Record<string, EventHandler> = {
 
   "ai-config-status": {
     category: "SAFE",
-    description: "Get all application settings and configuration including AI provider/model",
+    description: "Check the saved AI provider and whether its model, key and endpoint are configured (no values)",
     handler: async () => {
-      if (!isRunningInTauri()) return "[SIMULATED] Returning all settings...";
-      const { invoke } = await import("@tauri-apps/api/core");
-      const settings = await invoke("get_all_settings");
-      return JSON.stringify(settings, null, 2);
+      if (!isRunningInTauri()) return "AI configuration status unavailable in browser mode.";
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const settings = await invoke<Record<string, string>>("get_all_settings");
+        const provider = settings.ai_provider || DEFAULT_PROVIDER;
+        // This SAFE result goes straight into the next model request. Never
+        // return settings wholesale, even for inactive providers. Free-form
+        // models/endpoints can also contain private text: expose presence only.
+        const configured = (field: string) => Boolean(settings[`ai_${field}.${provider}`] || settings[`ai_${field}`]);
+        return JSON.stringify({
+          status: "available",
+          provider: findProvider(provider)?.id ?? "unknown",
+          modelConfigured: configured("model"),
+          keyConfigured: configured("api_key"),
+          endpointConfigured: configured("endpoint"),
+        });
+      } catch {
+        // Native errors can contain paths, URLs or credentials too.
+        return JSON.stringify({ status: "unavailable", reason: "AI configuration could not be read; current status is unknown." });
+      }
     }
   },
   "ai-update-config": {

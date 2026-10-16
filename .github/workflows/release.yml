@@ -115,10 +115,10 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: ${{ matrix.target }}
 
@@ -133,37 +133,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: Sync version to package.json
-        run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json'));
-            pkg.version = '$VERSION';
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-
-      - name: Sync version to Cargo.toml
-        working-directory: src-tauri
-        run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          # Cargo doesn't support pre-release suffixes — strip them
-          CARGO_VERSION=$(echo "$VERSION" | sed 's/-.*//')
-          sed -i.bak "s/^version = \".*\"/version = \"$CARGO_VERSION\"/" Cargo.toml
-          rm -f Cargo.toml.bak
-
-      - name: Sync version to tauri.conf.json
-        working-directory: src-tauri
-        run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          # Tauri uses semver — strip pre-release for bundle version
-          TAURI_VERSION=$(echo "$VERSION" | sed 's/-.*//')
-          node -e "
-            const fs = require('fs');
-            const conf = JSON.parse(fs.readFileSync('tauri.conf.json'));
-            conf.version = '$TAURI_VERSION';
-            fs.writeFileSync('tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
-          "
+      - name: Synchronize semantic application version
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: node scripts/release-version.mjs "$RELEASE_VERSION"
+        shell: bash
 
       - run: npm ci
 
@@ -212,7 +186,9 @@ jobs:
             - Run `xattr -cr /Applications/ColimaUI.app` after dragging the app to Applications.
 
             ### 🌐 Browser Mode
-            After launching the app, access the web UI at `http://127.0.0.1:11420`
+            Browser UI is a development surface (`npm run dev`); the packaged local HTTP API does not serve frontend assets.
+
+            Windows candidates are built separately and remain unqualified until both providers and the installed lifecycle pass.
 
             ---
             *Full changelog: https://github.com/${{ github.repository }}/compare/...${{ needs.prepare.outputs.tag }}*

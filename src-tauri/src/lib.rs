@@ -1,28 +1,53 @@
-pub mod error;
-pub mod routes;
+use tauri::Emitter;
+pub mod adapters;
 mod api_server;
 pub mod commands;
 pub mod crash;
-mod docker_state;
 pub mod docker_events;
+mod docker_state;
+pub mod error;
 pub mod instance_reader;
 pub mod path_util;
 mod poller;
-mod terminal_session;
-pub mod adapters;
+pub mod routes;
 pub mod services;
+mod terminal_session;
+#[cfg(windows)]
+pub mod windows_host;
+#[cfg(windows)]
+pub mod windows_pty;
 
 // Extracted from api_server.rs for single-responsibility
+pub mod api_reference;
+pub mod app_settings;
 pub mod auth;
-pub mod sse;
-pub mod validation;
-pub mod redact;
-pub mod tray;
-pub mod platform;
+pub mod child_process;
+pub mod engine_connection;
 pub mod helpers;
+pub mod host_features;
+pub mod platform;
+pub mod private_file;
+pub mod redact;
+pub mod sse;
 /// Long-running CLI commands whose output must not be buffered into RAM.
 pub mod streaming_cmd;
 pub mod transfer_registry;
+pub mod tray;
+pub mod validation;
+
+// Private native owners stay private; this real boundary suite is included in
+// the library harness and remains ignored unless the dedicated runner opts in.
+#[cfg(test)]
+#[path = "../tests/support/docker_fixture.rs"]
+mod windows_test_fixture;
+
+#[cfg(test)]
+#[path = "../tests/native/windows_provider_contract.rs"]
+mod windows_provider_contract;
+
+#[cfg(test)]
+#[path = "../tests/native/windows_metrics_cost.rs"]
+mod windows_metrics_cost;
 
 use commands::ai_chat;
 use commands::announcements;
@@ -32,7 +57,6 @@ use commands::compose_diagnose;
 use commands::containers;
 use commands::diagnostics;
 use commands::file_transfer;
-use commands::runtime;
 use commands::k8s_cluster;
 use commands::k8s_resources;
 use commands::kind;
@@ -42,6 +66,7 @@ use commands::lima;
 use commands::metrics_collector;
 use commands::models;
 use commands::networks;
+use commands::runtime;
 use commands::searxng;
 use commands::security_scan;
 use commands::shell_sandbox;
@@ -95,8 +120,13 @@ pub fn run() {
         // they all have to reach the same set of live ptys.
         .manage(terminal_session::create_session_manager())
         .setup(|app| {
+            // Resolve before any database or background owner can write. The
+            // CLI uses the same helper and never falls back to a public path.
+            std::fs::create_dir_all(path_util::try_app_data_dir()?)?;
             // Initialize Knowledge Bank (SQLite)
             knowledge_bank::init_knowledge_bank();
+
+            api_reference::prepare()?;
 
             // Start HTTP API server for browser-mode access
             api_server::start_api_server();
@@ -128,7 +158,8 @@ pub fn run() {
             commands::self_heal::spawn_sweeper();
 
             // Resource Saver Mode
-            let resource_saver_state = Arc::new(RwLock::new(commands::system::ResourceSaverState::default()));
+            let resource_saver_state =
+                Arc::new(RwLock::new(commands::system::ResourceSaverState::default()));
             app.manage(resource_saver_state.clone());
             commands::system::start_resource_saver_daemon(resource_saver_state);
 
@@ -314,6 +345,12 @@ pub fn run() {
             ai_chat::ai_chat_rename_conversation,
             ai_chat::ai_chat_delete_conversation,
             // Terminal (pty over IPC)
+            commands::engine_connection::get_engine_connection,
+            commands::engine_connection::check_engine_connection,
+            commands::engine_connection::save_engine_connection,
+            commands::engine_connection::restart_for_engine,
+            api_server::api_port,
+            terminal::terminal_target,
             terminal::terminal_create,
             terminal::terminal_write,
             terminal::terminal_resize,
@@ -364,12 +401,20 @@ pub fn run() {
             // Reap every pty on the way out. Terminal sessions hold an ssh
             // process inside the VM; without this they survive the window that
             // owned them and there is no longer any UI to close them from.
-            if let tauri::RunEvent::ExitRequested { .. } = event {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 reap_terminal_sessions(app);
                 // Same reasoning for streamed commands: a `docker save` started
                 // from a window that is going away has nothing left to report to,
                 // and would otherwise keep writing a file nobody is waiting for.
-                streaming_cmd::kill_all_streams();
+                if let Err(error) =
+                    commands::file_transfer::shutdown_transfers(std::time::Duration::from_secs(10))
+                {
+                    api.prevent_exit();
+                    eprintln!("{}", redact::redact(&error));
+                    let _ = app.emit("shutdown-blocked", error);
+                    return;
+                }
+                api_reference::close();
             }
         });
 }

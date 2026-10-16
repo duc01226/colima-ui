@@ -36,7 +36,7 @@ src/
 | Kubernetes | `Kubernetes.svelte` | Multi-resource K8s browser |
 | Linux VMs | `LinuxVMs.svelte` | Lima VM management |
 | Models | `Models.svelte` | Ollama AI model management |
-| Terminal | `Terminal.svelte` | Integrated xterm.js terminal |
+| Terminal | `Terminal.svelte` | Retained native xterm.js workspace with Docker/VM/Kubernetes target picker |
 | Terminal Instance | `TerminalInstance.svelte` | Individual terminal tab |
 | Settings | `Settings.svelte` | System info, disk usage, prune |
 | X-Ray | `XRay.svelte` | Kubernetes diagnostics |
@@ -50,11 +50,25 @@ src/
 | `ConfirmDialog.svelte` | Reusable confirmation dialog (destructive actions) |
 | `ContextMenu.svelte` | Right-click context menus |
 | `ErrorBoundary.svelte` | Error boundary wrapper |
-| `SetupWizard.svelte` | First-run guided setup |
-| `GettingStartedTour.svelte` | Interactive feature walkthrough |
+| `SetupWizard.svelte` | First-run guided setup; Windows reuses the existing-engine connection form |
+| `GettingStartedTour.svelte` | Interactive feature walkthrough with host-available destinations/copy |
 | `Icon.svelte` | Dynamic icon component |
 | `Icons.svelte` | SVG icon definitions |
 | `KubernetesHealth.svelte` | Cluster health dashboard |
+
+### Windows connection and host availability
+
+Setup and Settings reuse `EngineConnectionSettings` with the existing native select/buttons and SettingsSection layout. Platform detection precedes setup; Windows offers existing-engine selection and language, while platform failure stays retryable. The active engine, draft/checked candidate and saved next launch are separate. Continue requires the current active engine to be ready; checking another choice does not connect it. Persistence failure retains the draft, and Save never restarts implicitly (`src/components/SetupWizard.svelte:298`, `src/pages/Settings.svelte:49`, `src/components/settings/EngineConnectionSettings.svelte:25`, `src/lib/engineConnection.svelte.ts:77`).
+
+An explicit restart dialog discloses terminal closure, checks active transfers and offers the notification panel for finishing/cancelling them; Cancel restores focus and preserves the current session. The backend repeats admission and cleanup before requesting restart. App/sidebar show active-engine status and recovery; ordinary Windows views wait for known host policy, readiness, matching C/I origin and a successful complete resource read for that generation. Terminal remains retained outside ordinary view admission (`src/components/settings/EngineConnectionSettings.svelte:34`, `src/components/settings/EngineConnectionSettings.svelte:48`, `src-tauri/src/commands/engine_connection.rs:72`, `src/App.svelte:80`, `src/App.svelte:202`, `src/App.svelte:284`).
+
+Ordinary Windows resource pages unmount while unavailable. App holds memory-only recovery for one active page and original context/endpoint/engine, with generation as revision. It restores choices only after the current complete membership is available, so a partial event cannot consume saved IDs against cleared lists. Registered fields and neutral selection/filter/tab choices restore once; navigation, origin change and App disposal discard them. Resource-specific choices bind to fresh membership; private typed paths/environment stay out of settings and notifications. No old object, output, callback, approval or busy state is restored (`src/App.svelte:86`, `src/lib/recoveryDrafts.svelte.ts:17`, `src/pages/Containers.svelte:504`, `src/components/transfer/TransferDialog.svelte:50`).
+
+Containers/Images/Networks/Volumes retain checked identities and request fresh detail output; later search/filter edits clear checked rows. Topology restores filters and a node only after a fresh graph; Activity restores sorting/tab/history-kind and a container only after a fresh sample. Compose matches a fresh project name and selected tab without diagnosis replay. Security matches both image content ID and reference, retains tab/strictness/severity/passed preferences, and requires a new explicit scan. Activity and Security own nested preferences through bound child props (`src/pages/Images.svelte:34`, `src/pages/Topology.svelte:49`, `src/pages/Activity.svelte:55`, `src/pages/Compose.svelte:26`, `src/pages/Security.svelte:67`, `src/pages/Activity.svelte:288`, `src/pages/Security.svelte:449`).
+
+Image pulling retains pending/rejected user input. Only a successful submission with the same edit revision clears it, including the edit-away-and-back case. Expected form rejection is reported locally; automation overrides do not own or clear the user draft and still report failure to their caller (`src/pages/Images.svelte:92`).
+
+Capability helpers own navigation/empty-state wording; missing CLI, stopped engine, unsupported features and healthy empty resources remain distinct. Windows hides VM/Kubernetes/model-serving controls, adjusts tour copy and checks the Compose plugin separately. Docker terminal targets remain independent of VM/Kubernetes targets. Connection/recovery copy is present in en/vi/zh/ja; native assistive reading, focus/reflow and localized runtime flows remain unqualified (`src/store/capabilities.svelte.ts:149`, `src/components/Sidebar.svelte:103`, `src/components/GettingStartedTour.svelte:108`, `src/pages/Compose.svelte:30`, `src/pages/Terminal.svelte:93`, `src/locales/en.json:578`, `src/locales/vi.json:578`, `src/locales/zh.json:578`, `src/locales/ja.json:578`).
 
 ## State Management
 
@@ -112,44 +126,29 @@ async function listContainers(all: boolean) {
 | `knowledgeBankApi` | query, learn, feedback, memory |
 | `sandboxApi` | classify, execute, executeApproved |
 
+### Interactive Docker terminal
+
+Containers exposes Open terminal in row overflow and the Exec detail pane; `containerTerminalTarget` obtains a backend-verified stable ID and engine before handing a typed `containerExec` target to the existing retained Terminal view. The Docker picker loads independently of VM/Kubernetes availability and uses the common New Session count (`src/pages/Containers.svelte:45`, `src/pages/Containers.svelte:76`, `src/lib/terminal-transport.ts:82`, `src/pages/Terminal.svelte:66`, `src/pages/Terminal.svelte:176`).
+
+Terminal sessions use IPC Channel output and create/write/resize/poll-exit/close commands; browser mode has no HTTP terminal fallback. `TerminalInstance` closes late acquisitions after unmount, disables input after end/error and preserves the named container/engine for Logs recovery. Native buttons and a modal picker own session controls; xterm owns Escape/editor keys, with a visible Focus terminal button and Ctrl+Shift+F6 focus exit (`src/lib/terminal-transport.ts:96`, `src/pages/Terminal.svelte:253`, `src/pages/Terminal.svelte:309`, `src/pages/TerminalInstance.svelte:107`, `src/pages/TerminalInstance.svelte:130`, `src/pages/TerminalInstance.svelte:191`, `src/pages/TerminalInstance.svelte:209`, `src/lib/keyboardShortcuts.ts:25`). Authored lifecycle tests and screenReaderMode are preparation; native accessibility and Windows behavior remain unqualified.
+
 ## Event System
 
 ### Desktop Mode (Tauri Events)
-```typescript
-import { listen } from '@tauri-apps/api/event';
 
-listen('docker-state-updated', (event) => {
-  containers = event.payload.containers;
-  images = event.payload.images;
-});
+App owns `startDataPoller` and cleanup. The shared resource refetch fences fulfillment and rejection by run/revision/ready Windows generation; all four resource-page refreshes and the retained Terminal picker use it on Windows. Native POSIX and browser full refreshes publish successful C/I, volume and network groups independently; a failed peer retains prior membership and the shared bounded retry remains lifetime-owned. Their delayed volume/network reads publish independently too. For already-mounted volume/network views, the loss path keeps cleared lists loading through failed delayed reads, even with cached running capabilities. Docker failure does not replace known macOS/Linux VM-management views or their explicit Start controls. Unknown Terminal neither acquires nor presents Docker targets; target preflight failures stay visible alongside shared resource failures. On native Windows, partial container/image updates retain any aggregate read failure; only a complete current four-family refresh clears it. Delayed volume/network acquisition and settlement match both the event generation and complete-refresh outcome revision, with current failures attributed and older results ignored. Late listener acquisition unlistens after disposal, loss clears live resources/detail intent, and `shutdown-blocked` surfaces localized recovery (`src/lib/dataPoller.ts:31`, `src/lib/dataPoller.ts:89`, `src/lib/dataPoller.ts:167`, `src/pages/Terminal.svelte:59`, `src/pages/Terminal.svelte:66`).
 
-listen('instances-update', (event) => {
-  instances = event.payload;
-});
-```
+Dashboard owns its independent Compose-count outcome: Windows shows an unknown value with loading or failure status until the current read succeeds. Empty success remains zero, the existing card opens Compose for recovery, and other supported platforms retain their cache behavior (`src/pages/Dashboard.svelte:104`, `src/pages/Dashboard.svelte:420`).
 
 ### Browser Mode (SSE)
-```typescript
-// EventSource cannot set headers, so /api/events authenticates via ?token=.
-// getApiToken() reads it from IPC (desktop) or from the URL fragment the tab
-// was opened with (browser) — there is no endpoint to fetch it from.
-const es = new EventSource(`/api/events?token=${await getApiToken()}`);
 
-es.addEventListener('docker-state', (e) => {
-  const data = JSON.parse(e.data);
-  containers = data.containers;
-});
-
-es.addEventListener('instances', (e) => {
-  instances = JSON.parse(e.data);
-});
-```
+The same poller consumes `docker-state-updated`/`instances-update` through EventSource and owns reconnect/backoff, visible-window fallback polling and teardown. EventSource uses the allowlisted query token because it cannot set headers; native credentials come from IPC and browser credentials from the one-time URL fragment, never an HTTP token endpoint (`src-tauri/src/auth.rs:49`, `src/lib/api/client.ts:249`). Metrics use named-topic SSE in both modes; native API discovery uses the bound-port IPC owner, while browser health discovery is retained. Metrics/transfer discovery uses capped retry delays and cannot open a socket after unsubscribe (`src/lib/dataPoller.ts:274`, `src/lib/api/client.ts:45`, `src/lib/api/metrics.ts:65`, `src/lib/transferEvents.ts:58`).
 
 ## Lib Utilities
 
 | Module | Purpose |
 |--------|---------|
-| `aiEventBus.ts` | AI agent event bus with domain-specific tool registrations |
+| `aiEventBus.ts` | Host-filtered AI event advertisement/category/dispatch; backend remains authoritative |
 | `aiToolParser.ts` | Parse AI tool-call XML from LLM responses |
 | `llmProviders.ts` | Multi-provider LLM integration config |
 | `formatters.ts` | Display formatting (bytes, dates, durations) |
@@ -162,6 +161,7 @@ es.addEventListener('instances', (e) => {
 | `osNotify.ts` | Operating-system notifications, desktop only |
 | `i18n.svelte.ts` | Internationalization with reactive locale |
 | `settingsStore.svelte.ts` | SQLite-backed persistent settings |
+| `engineConnection.svelte.ts` | Active snapshot, checked draft and saved-next preference with stale-response fences |
 | `presetStateManager.ts` | Instance configuration preset management |
 
 ### Notifications and background transfers
@@ -194,6 +194,8 @@ Two consequences worth knowing:
   a file name. That is what lets `formatEntryForClipboard` promise its output is
   safe to paste into an issue, and what lets `osNotify` send a title to the
   operating system's own notification centre.
+
+Windows host-path placeholders remain distinct from container paths. Native save-file selection uses Tauri dirname/basename and assigns fields only after both resolve; cancel/path failure preserves typed input. Notification import labels take only the last segment of either slash style; full host paths stay out of that handoff (`src/components/transfer/TransferDialog.svelte:154`, `src/components/transfer/TransferDialog.svelte:80`). Backend confinement remains a separate responsibility; native picker behavior is unqualified.
 
 ### Announcements (`lib/announcements.ts`)
 
@@ -249,6 +251,8 @@ Domain-specific AI tool handlers:
 | `system.ts` | System checks, tool installation |
 | `config.ts` | App configuration |
 
+Windows `agentCore` appends the filtered event catalog to native Docker context, gates legacy VM/Kubernetes queries/diagnostics and refuses unavailable events before approval. This changes capability context without additional model calls or authority (`src/lib/agentCore.ts:77`, `src/lib/aiEventBus.ts:28`). Read `docs/ai.md` for the actual sender/backend contracts.
+
 ## CSS Design System (`styles/`)
 
 Vanilla CSS with a modular token-based architecture:
@@ -279,3 +283,5 @@ Test files follow the `*.test.ts` convention alongside source files:
 - `normalizers.test.ts`
 - `markdown.test.ts`
 - `i18n.test.ts`
+- `src/lib/terminal-transport.test.ts:11` — substituted IPC target/literal input/resize guards
+- `src/pages/TerminalInstance.test.ts:38` — held acquisition, late success/failure and running Close; authored tests are not an execution result

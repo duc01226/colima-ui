@@ -6,8 +6,10 @@
   import * as Icons from "../components/Icons.svelte";
   import RowActions from "../components/RowActions.svelte";
   import { t } from "../lib/i18n.svelte";
-  import { blockingCapability, capabilityNotice } from "../store/capabilities.svelte";
+  import { blockingCapability, capabilityNotice, isDockerOnlyHost } from "../store/capabilities.svelte";
+  import { refetchAllResources } from "../lib/dataPoller";
   import { viewInTopology } from "../lib/topology-link";
+  import { recoveryDraft } from "../lib/recoveryDrafts.svelte";
 
   let searchTerm = $state("");
   let showCreate = $state(false);
@@ -16,13 +18,22 @@
   let newSubnet = $state("");
   let actionLoading = $state<string | null>(null);
   let inspecting = $state<string | null>(null);
+  let inspectingId: string | null = null;
   let inspectData = $state<string>("");
   let selected = $state<Set<string>>(new Set());
   let batchLoading = $state(false);
   let confirm = $state<{ title: string; message: string; confirmLabel: string; danger: boolean; onConfirm: () => void; onCancel?: () => void } | null>(null);
   let runtimeName = $state("docker");
 
+  recoveryDraft("network-input", () => ({ searchTerm, showCreate, newName, newDriver, newSubnet, selected: [...selected], inspectId: inspectingId }), (draft) => {
+    ({ searchTerm, showCreate, newName, newDriver, newSubnet } = draft);
+    selected = new Set(draft.selected.filter((id) => resourceState.networks.some((n) => n.Id === id)));
+    const target = resourceState.networks.find((n) => n.Id === draft.inspectId);
+    if (target) void handleInspect(target.Name);
+  });
+
   async function refreshNetworks() {
+    if (isDockerOnlyHost()) return refetchAllResources();
     try {
       const list = await networksApi.listNetworks();
       resourceState.networks = list;
@@ -55,9 +66,11 @@
     return () => window.removeEventListener("delete-network", aiListener);
   });
 
+  let selectionFilterInitialized = false;
   $effect(() => {
     if (searchTerm !== undefined) {
-      selected = new Set();
+      if (selectionFilterInitialized) selected = new Set();
+      selectionFilterInitialized = true;
     }
   });
 
@@ -132,11 +145,13 @@
   }
 
   async function handleInspect(name: string) {
-    if (inspecting === name) { inspecting = null; return; }
+    if (inspecting === name) { inspecting = null; inspectingId = null; return; }
+    const targetId = resourceState.networks.find((n) => n.Name === name)?.Id ?? null;
     try {
       const data = await networksApi.inspectNetwork(name);
       inspectData = data;
       inspecting = name;
+      inspectingId = targetId;
     } catch (e) {
       globalToast("error", String(e));
     }
@@ -269,7 +284,7 @@
   {#if resourceState.networksLoading}
     <div style="text-align: center; padding: 40px; color: var(--text-muted);">{t('networks.loading', { default: 'Loading networks...' })}</div>
   {:else if filteredNetworks.length === 0}
-    {@const blocked = searchTerm ? undefined : blockingCapability("colima", "docker")}
+    {@const blocked = blockingCapability("colima", "docker")}
     <div style="text-align: center; padding: 40px; color: var(--text-muted);">
       {#if blocked}
         <div>{capabilityNotice(blocked).title}</div>

@@ -446,11 +446,9 @@ pub fn update_rule(
     init(&conn)?;
 
     let action: String = conn
-        .query_row(
-            "SELECT action FROM heal_rules WHERE id = ?1",
-            [id],
-            |r| r.get(0),
-        )
+        .query_row("SELECT action FROM heal_rules WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
         .map_err(|_| "No such rule".to_string())?;
     let action = HealAction::parse(&action).ok_or_else(|| "Unknown action".to_string())?;
     if mode == HealMode::Auto && !action.auto_capable() {
@@ -578,10 +576,8 @@ fn spent_this_hour(conn: &Connection, rule_id: i64, now: i64) -> i64 {
          WHERE rule_id = ?1 AND ts >= ?2 AND outcome IN ({placeholders})"
     );
 
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-        Box::new(rule_id),
-        Box::new(now - QUOTA_WINDOW_MS),
-    ];
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+        vec![Box::new(rule_id), Box::new(now - QUOTA_WINDOW_MS)];
     for o in counted {
         params.push(Box::new(o.to_string()));
     }
@@ -595,6 +591,7 @@ fn spent_this_hour(conn: &Connection, rule_id: i64, now: i64) -> i64 {
 
 /// One firing of one rule, before it is decided what to do about it.
 pub struct Firing {
+    pub origin_generation: Option<u64>,
     pub rule: HealRule,
     pub container_id: String,
     pub container_name: String,
@@ -610,11 +607,15 @@ pub struct Firing {
 pub async fn execute(firing: Firing) -> HealOutcome {
     let rule = &firing.rule;
 
+    let mut origin_blocked = false;
     let outcome = if !is_enabled() {
         HealOutcome::SwitchedOff
     } else if rule.mode == HealMode::Suggest || !rule.action.auto_capable() {
         // The advisory path. Note there is no `else` below that can run an
         // advisory action: `SuggestPrune` and `SuggestMemLimit` end here.
+        HealOutcome::Suggested
+    } else if validate_firing_origin(&firing).await.is_err() {
+        origin_blocked = true;
         HealOutcome::Suggested
     } else if quota_spent(rule) {
         HealOutcome::QuotaBlocked
@@ -625,13 +626,20 @@ pub async fn execute(firing: Firing) -> HealOutcome {
         }
     };
 
-    let detail = match outcome {
-        HealOutcome::QuotaBlocked => format!(
-            "{} — blocked, already acted {} times this hour",
-            firing.detail, rule.max_per_hour
-        ),
-        HealOutcome::SwitchedOff => format!("{} — not run, self-healing is off", firing.detail),
-        _ => firing.detail.clone(),
+    let detail = if origin_blocked {
+        format!(
+            "{} — not run: originating engine or host capability is unavailable",
+            firing.detail
+        )
+    } else {
+        match outcome {
+            HealOutcome::QuotaBlocked => format!(
+                "{} — blocked, already acted {} times this hour",
+                firing.detail, rule.max_per_hour
+            ),
+            HealOutcome::SwitchedOff => format!("{} — not run, self-healing is off", firing.detail),
+            _ => firing.detail.clone(),
+        }
     };
 
     let entry = HealLogEntry {
@@ -660,6 +668,30 @@ fn quota_spent(rule: &HealRule) -> bool {
         return true;
     }
     spent_this_hour(&conn, rule.id, now_ms()) >= rule.max_per_hour
+}
+
+fn origin_is_current(expected: Option<u64>, observed: Option<u64>) -> bool {
+    expected.is_some() && expected == observed
+}
+
+// The Windows branch performs asynchronous engine verification.
+#[cfg_attr(not(windows), allow(clippy::unused_async))]
+async fn validate_firing_origin(firing: &Firing) -> Result<(), String> {
+    if matches!(firing.rule.action, HealAction::RestartVm) {
+        crate::host_features::HostFeature::ManagedVms.require()?;
+    }
+    if cfg!(windows) && !origin_is_current(firing.origin_generation, firing.origin_generation) {
+        return Err("Missing originating engine generation".into());
+    }
+    #[cfg(windows)]
+    {
+        let connection = crate::engine_connection::active()?;
+        connection.verified_client().await?;
+        if !origin_is_current(firing.origin_generation, connection.read_generation().ok()) {
+            return Err("The originating engine generation is unavailable".into());
+        }
+    }
+    Ok(())
 }
 
 /// The only place an automatic action touches the machine.
@@ -726,7 +758,8 @@ struct Watch {
     /// Death timestamps inside the crash-loop window.
     deaths: HashMap<String, Vec<i64>>,
     /// When each container was first seen unhealthy, and its name.
-    unhealthy_since: HashMap<String, (i64, String)>,
+    unhealthy_since: HashMap<String, (i64, String, Option<u64>)>,
+    generation: Option<u64>,
 }
 
 fn watch() -> &'static Mutex<Watch> {
@@ -780,12 +813,30 @@ pub fn spawn_watcher() {
 }
 
 async fn handle_event(event: ContainerEvent) {
+    #[cfg(windows)]
+    if !origin_is_current(
+        event.origin_generation,
+        crate::engine_connection::read_generation().ok(),
+    ) {
+        return;
+    }
+    {
+        let Ok(mut state) = watch().lock() else {
+            return;
+        };
+        if state.generation != event.origin_generation {
+            state.deaths.clear();
+            state.unhealthy_since.clear();
+            state.generation = event.origin_generation;
+        }
+    }
     let now = now_ms();
 
     if event.is_oom() {
         if let Some(rule) = rule_for(HealTrigger::OomKilled) {
             let detail = suggest_mem_limit_detail(&event.container_id);
             execute(Firing {
+                origin_generation: event.origin_generation,
                 rule,
                 container_id: event.container_id.clone(),
                 container_name: event.container_name.clone(),
@@ -801,14 +852,11 @@ async fn handle_event(event: ContainerEvent) {
             let threshold = rule.threshold.max(1.0) as usize;
             if note_death(&event.container_id, now, window_ms, threshold) {
                 execute(Firing {
+                    origin_generation: event.origin_generation,
                     rule,
                     container_id: event.container_id.clone(),
                     container_name: event.container_name.clone(),
-                    detail: format!(
-                        "died {} times in {} seconds",
-                        threshold,
-                        window_ms / 1000
-                    ),
+                    detail: format!("died {} times in {} seconds", threshold, window_ms / 1000),
                 })
                 .await;
             }
@@ -821,7 +869,7 @@ async fn handle_event(event: ContainerEvent) {
         if unhealthy {
             w.unhealthy_since
                 .entry(event.container_id.clone())
-                .or_insert((now, event.container_name.clone()));
+                .or_insert((now, event.container_name.clone(), event.origin_generation));
         } else {
             w.unhealthy_since.remove(&event.container_id);
         }
@@ -839,24 +887,25 @@ pub async fn sweep_unhealthy() {
     let cutoff_ms = (rule.threshold.max(1.0) * 60_000.0) as i64;
     let now = now_ms();
 
-    let due: Vec<(String, String)> = {
+    let due: Vec<(String, String, Option<u64>)> = {
         let Ok(mut w) = watch().lock() else { return };
-        let due: Vec<(String, String)> = w
+        let due: Vec<(String, String, Option<u64>)> = w
             .unhealthy_since
             .iter()
-            .filter(|(_, (since, _))| now - *since >= cutoff_ms)
-            .map(|(id, (_, name))| (id.clone(), name.clone()))
+            .filter(|(_, (since, _, _))| now - *since >= cutoff_ms)
+            .map(|(id, (_, name, generation))| (id.clone(), name.clone(), *generation))
             .collect();
         // Drop them so the rule fires once per unhealthy spell, not once per
         // sweep for as long as the container stays down.
-        for (id, _) in &due {
+        for (id, _, _) in &due {
             w.unhealthy_since.remove(id);
         }
         due
     };
 
-    for (id, name) in due {
+    for (id, name, origin_generation) in due {
         execute(Firing {
+            origin_generation,
             rule: rule.clone(),
             container_id: id,
             container_name: name,
@@ -906,7 +955,9 @@ async fn sweep_disk() {
         return;
     };
     let svc = crate::services::container::ContainerService::auto_detect();
-    let Ok(df) = svc.system_df().await else { return };
+    let Ok(df) = svc.system_df().await else {
+        return;
+    };
 
     let Some(reclaimable) = parse_reclaimable_bytes(&df) else {
         return;
@@ -920,6 +971,7 @@ async fn sweep_disk() {
     }
 
     execute(Firing {
+        origin_generation: None, // Advisory-only disk rule never performs an action.
         rule,
         container_id: String::new(),
         container_name: String::new(),
@@ -985,8 +1037,8 @@ pub async fn self_heal_save_rule(
     max_per_hour: i64,
     enabled: bool,
 ) -> Result<(), crate::error::ColimaError> {
-    let result =
-        update_rule(id, mode, threshold, max_per_hour, enabled).map_err(crate::error::ColimaError::from);
+    let result = update_rule(id, mode, threshold, max_per_hour, enabled)
+        .map_err(crate::error::ColimaError::from);
 
     crate::commands::activity::record(
         crate::commands::activity::ActivityEntry::new(
@@ -995,7 +1047,10 @@ pub async fn self_heal_save_rule(
             "heal_rule",
             &id.to_string(),
         )
-        .detail(format!("mode {}, at most {max_per_hour}/hour, enabled {enabled}", mode.as_str()))
+        .detail(format!(
+            "mode {}, at most {max_per_hour}/hour, enabled {enabled}",
+            mode.as_str()
+        ))
         .outcome_of(&result),
     );
 
@@ -1035,6 +1090,94 @@ pub async fn self_heal_set_enabled(on: bool) -> Result<(), crate::error::ColimaE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quota_history(conn: &Connection, rule: i64, at: i64, outcome: &str) {
+        // Valid persisted history is an unrelated precondition for the quota
+        // READ boundary. This does not claim to exercise execute/record or an
+        // actual repair effect; those retain native qualification obligations.
+        conn.execute(
+            "INSERT INTO heal_log (ts, rule_id, rule_name, action, mode, outcome)
+             VALUES (?1, ?2, 'quota fixture', 'restart_container', 'auto', ?3)",
+            rusqlite::params![at, rule, outcome],
+        )
+        .unwrap();
+    }
+
+    // TestSpec=TC-WINUI-017: partial real SQLite quota-query guard; successful
+    // and failed actual effects/default/killswitch/origin are not proved here.
+    #[test]
+    fn quota_query_counts_attempts_but_not_advice_or_another_rules_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        let now = 2 * QUOTA_WINDOW_MS;
+        assert_eq!(spent_this_hour(&conn, 1, now), 0);
+        for outcome in ["suggested", "quota_blocked", "switched_off"] {
+            quota_history(&conn, 1, now, outcome);
+            assert_eq!(spent_this_hour(&conn, 1, now), 0);
+        }
+        quota_history(&conn, 1, now, "executed");
+        assert_eq!(spent_this_hour(&conn, 1, now), 1);
+        quota_history(&conn, 1, now, "failed");
+        assert_eq!(spent_this_hour(&conn, 1, now), 2);
+        quota_history(&conn, 2, now, "executed");
+        assert_eq!(spent_this_hour(&conn, 1, now), 2);
+        assert_eq!(spent_this_hour(&conn, 2, now), 1);
+    }
+
+    // TestSpec=TC-WINUI-017: exactly one-hour-old attempts count; the same
+    // persisted history expires one millisecond later, without deleting data.
+    #[test]
+    fn quota_query_includes_the_exact_hour_boundary_then_expires_it() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        let action_time = QUOTA_WINDOW_MS;
+        for outcome in ["executed", "failed"] {
+            quota_history(&conn, 1, action_time, outcome);
+        }
+        for delta in [-1, 0] {
+            assert_eq!(
+                spent_this_hour(&conn, 1, action_time + QUOTA_WINDOW_MS + delta),
+                2
+            );
+        }
+        assert_eq!(
+            spent_this_hour(&conn, 1, action_time + QUOTA_WINDOW_MS + 1),
+            0
+        );
+        let retained: i64 = conn
+            .query_row("SELECT COUNT(*) FROM heal_log", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            retained, 2,
+            "expiry changes eligibility, never persisted history"
+        );
+    }
+
+    // TestSpec=TC-WINUI-017: a real unreadable quota read must fail closed.
+    #[test]
+    fn unreadable_quota_history_cannot_authorize_an_automatic_action() {
+        // Deliberate damaged/missing storage models an unavailable SQLite read;
+        // it must not masquerade as zero actions already spent.
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(spent_this_hour(&conn, 1, QUOTA_WINDOW_MS), i64::MAX);
+        init(&conn).unwrap();
+        assert_eq!(spent_this_hour(&conn, 1, QUOTA_WINDOW_MS), 0);
+        conn.execute_batch("DROP TABLE heal_log").unwrap();
+        assert_eq!(spent_this_hour(&conn, 1, QUOTA_WINDOW_MS), i64::MAX);
+    }
+
+    #[test]
+    fn stale_or_unattributed_events_cannot_authorize_repair_after_recovery() {
+        assert!(origin_is_current(Some(7), Some(7)));
+        for pair in [
+            (None, None),
+            (None, Some(7)),
+            (Some(7), None),
+            (Some(7), Some(8)),
+        ] {
+            assert!(!origin_is_current(pair.0, pair.1));
+        }
+    }
 
     #[test]
     fn advisory_actions_are_never_auto_capable() {

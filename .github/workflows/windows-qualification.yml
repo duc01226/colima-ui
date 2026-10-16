@@ -1,0 +1,77 @@
+name: Windows native application boundaries (no publication)
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        type: choice
+        options: [docker-desktop, rancher-moby]
+        required: true
+      context:
+        description: Context already selected in the disposable app profile
+        required: true
+      engine_id:
+        description: Exact ID of the arranged empty dedicated engine
+        required: true
+      fixture_image:
+        description: Already-local winui-v1 fixture image
+        required: true
+      fixture_id:
+        description: Exact sha256 content ID of that fixture
+        required: true
+      dedicated_engine:
+        description: Repeat the exact engine ID to authorize run-owned mutations
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  native-boundaries:
+    # Operator supplies a disposable Windows 11 x64 account/engine. Hosted
+    # Server builds and unsigned candidates cannot supply this qualification.
+    runs-on: [self-hosted, Windows, X64, colimaui-native-qualification]
+    environment: windows-qualification
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: clippy,rustfmt
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: npm ci
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          vsversion: '2022'
+          toolset: '14.44'
+          sdk: '10.0.26100.0'
+      - name: Real app-boundary assertions on the selected dedicated provider
+        env:
+          PROVIDER: ${{ inputs.provider }}
+          CONTEXT: ${{ inputs.context }}
+          ENGINE_ID: ${{ inputs.engine_id }}
+          FIXTURE_IMAGE: ${{ inputs.fixture_image }}
+          FIXTURE_ID: ${{ inputs.fixture_id }}
+          DEDICATED_ENGINE: ${{ inputs.dedicated_engine }}
+        shell: pwsh
+        run: >-
+          node scripts/windows-qualify.mjs
+          --provider "$env:PROVIDER" --context "$env:CONTEXT"
+          --engine-id "$env:ENGINE_ID" --fixture-image "$env:FIXTURE_IMAGE"
+          --fixture-id "$env:FIXTURE_ID" --dedicated-engine "$env:DEDICATED_ENGINE"
+          --profile disposable-account
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-native-${{ inputs.provider }}-${{ github.sha }}
+          path: tmp/reports/windows-native/**/boundary.json
+          if-no-files-found: error
+          retention-days: 14

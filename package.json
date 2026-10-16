@@ -16,12 +16,25 @@
     "test:watch": "vitest",
     "lint": "eslint . --max-warnings=0",
     "lint:fix": "eslint . --fix --max-warnings=0",
-    "lint:rust": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
+    "lint:rust": "cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
     "check:tokens": "node scripts/check-css-tokens.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
-    "prepare": "bash scripts/setup-hooks.sh",
-    "check:i18n": "node scripts/check-i18n-keys.mjs"
+    "prepare": "node scripts/setup-hooks.mjs",
+    "check:i18n": "node scripts/check-i18n-keys.mjs",
+    "test:tooling": "node --test scripts/release-version.node-test.mjs scripts/windows-build.node-test.mjs scripts/windows-qualify.node-test.mjs scripts/windows-metrics.node-test.mjs scripts/fault-seed.node-test.mjs scripts/windows-toolchain.node-test.mjs scripts/check-windows-foundation.node-test.mjs scripts/check-dependencies.node-test.mjs scripts/measure-build.node-test.mjs scripts/windows-spec.node-test.mjs scripts/windows-evidence.node-test.mjs scripts/windows-update-fixtures.node-test.mjs scripts/windows-update-feed.node-test.mjs",
+    "build:windows": "node scripts/windows-build.mjs candidate",
+    "build:windows:signed": "node scripts/windows-build.mjs signed",
+    "qualify:windows": "node scripts/windows-qualify.mjs",
+    "qualify:windows:metrics": "node scripts/windows-metrics.mjs",
+    "test:mutations:windows": "node scripts/fault-seed.mjs tests/windows-mutations.json",
+    "test:mutations:windows-native": "node scripts/fault-seed.mjs tests/windows-native-mutations.json",
+    "check:windows": "node scripts/check-windows-foundation.mjs",
+    "check:dependencies": "node scripts/check-dependencies.mjs",
+    "measure:build": "node scripts/measure-build.mjs",
+    "qualify:windows:evidence": "node scripts/windows-evidence.mjs",
+    "qualify:windows:update-fixtures": "node scripts/windows-update-fixtures.mjs",
+    "qualify:windows:update-feed": "node scripts/windows-update-feed.mjs"
   },
   "dependencies": {
     "@fontsource/inter": "^5.3.0",
@@ -47,6 +60,7 @@
     "@testing-library/jest-dom": "^7.0.0",
     "@testing-library/svelte": "^5.4.2",
     "@tsconfig/svelte": "^5.0.8",
+    "@types/node": "24.19.2",
     "eslint": "^10.8.1",
     "eslint-plugin-svelte": "^3.22.0",
     "globals": "^17.10.0",
@@ -58,5 +72,6 @@
     "typescript-eslint": "^8.67.0",
     "vite": "^8.1.5",
     "vitest": "^4.1.10"
-  }
+  },
+  "packageManager": "npm@11.19.0"
 }

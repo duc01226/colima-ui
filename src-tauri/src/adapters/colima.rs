@@ -2,8 +2,8 @@
 //!
 //! Wraps the `colima` CLI and reads `~/.colima/` filesystem for fast listing.
 
-use async_trait::async_trait;
 use super::traits::*;
+use async_trait::async_trait;
 
 /// Colima VM manager adapter.
 pub struct ColimaAdapter;
@@ -35,6 +35,9 @@ impl VMManager for ColimaAdapter {
     }
 
     async fn list(&self) -> Result<Vec<VMInstance>, AdapterError> {
+        crate::host_features::HostFeature::ManagedVms
+            .require()
+            .map_err(|e| AdapterError::new("colima", e))?;
         // Use the fast filesystem reader (shared with API server and Tauri commands)
         let instances = crate::instance_reader::list_instances_fast();
         Ok(instances
@@ -54,6 +57,9 @@ impl VMManager for ColimaAdapter {
     }
 
     async fn start(&self, config: VMConfig) -> Result<String, AdapterError> {
+        crate::host_features::HostFeature::ManagedVms
+            .require()
+            .map_err(|e| AdapterError::new("colima", e))?;
         let profile = config.profile.clone();
         tokio::task::spawn_blocking(move || {
             let mut args = vec!["start".to_string()];
@@ -110,7 +116,10 @@ impl VMManager for ColimaAdapter {
                 .map_err(|e| AdapterError::new("colima", format!("Failed to start: {}", e)))?;
 
             if !output.status.success() {
-                return Err(AdapterError::new("colima", format!("start failed: {}", String::from_utf8_lossy(&output.stderr))));
+                return Err(AdapterError::new(
+                    "colima",
+                    format!("start failed: {}", String::from_utf8_lossy(&output.stderr)),
+                ));
             }
 
             Ok(format!("Instance '{}' started successfully", profile))
@@ -120,6 +129,9 @@ impl VMManager for ColimaAdapter {
     }
 
     async fn stop(&self, profile: &str, force: bool) -> Result<String, AdapterError> {
+        crate::host_features::HostFeature::ManagedVms
+            .require()
+            .map_err(|e| AdapterError::new("colima", e))?;
         let profile = profile.to_string();
         tokio::task::spawn_blocking(move || {
             let mut args = vec!["stop".to_string()];
@@ -139,7 +151,10 @@ impl VMManager for ColimaAdapter {
                 .map_err(|e| AdapterError::new("colima", format!("Failed to stop: {}", e)))?;
 
             if !output.status.success() {
-                return Err(AdapterError::new("colima", format!("stop failed: {}", String::from_utf8_lossy(&output.stderr))));
+                return Err(AdapterError::new(
+                    "colima",
+                    format!("stop failed: {}", String::from_utf8_lossy(&output.stderr)),
+                ));
             }
 
             Ok(format!("Instance '{}' stopped", profile))
@@ -149,6 +164,9 @@ impl VMManager for ColimaAdapter {
     }
 
     async fn delete(&self, profile: &str, force: bool) -> Result<String, AdapterError> {
+        crate::host_features::HostFeature::ManagedVms
+            .require()
+            .map_err(|e| AdapterError::new("colima", e))?;
         let profile = profile.to_string();
         tokio::task::spawn_blocking(move || {
             let mut args = vec!["delete".to_string()];
@@ -168,7 +186,10 @@ impl VMManager for ColimaAdapter {
                 .map_err(|e| AdapterError::new("colima", format!("Failed to delete: {}", e)))?;
 
             if !output.status.success() {
-                return Err(AdapterError::new("colima", format!("delete failed: {}", String::from_utf8_lossy(&output.stderr))));
+                return Err(AdapterError::new(
+                    "colima",
+                    format!("delete failed: {}", String::from_utf8_lossy(&output.stderr)),
+                ));
             }
 
             Ok(format!("Instance '{}' deleted", profile))
@@ -178,6 +199,9 @@ impl VMManager for ColimaAdapter {
     }
 
     async fn status(&self, profile: &str) -> Result<VMStatus, AdapterError> {
+        crate::host_features::HostFeature::ManagedVms
+            .require()
+            .map_err(|e| AdapterError::new("colima", e))?;
         let profile = profile.to_string();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -190,18 +214,21 @@ impl VMManager for ColimaAdapter {
                     args.push(&profile_flag);
                 }
 
-                let output = Self::colima_cmd()
-                    .args(&args)
-                    .output()
-                    .map_err(|e| AdapterError::new("colima", format!("Failed to get status: {}", e)))?;
+                let output = Self::colima_cmd().args(&args).output().map_err(|e| {
+                    AdapterError::new("colima", format!("Failed to get status: {}", e))
+                })?;
 
                 if !output.status.success() {
-                    return Err(AdapterError::new("colima", format!("status failed: {}", String::from_utf8_lossy(&output.stderr))));
+                    return Err(AdapterError::new(
+                        "colima",
+                        format!("status failed: {}", String::from_utf8_lossy(&output.stderr)),
+                    ));
                 }
 
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                let status: VMStatus = serde_json::from_str(&stdout)
-                    .map_err(|e| AdapterError::new("colima", format!("Failed to parse status: {}", e)))?;
+                let status: VMStatus = serde_json::from_str(&stdout).map_err(|e| {
+                    AdapterError::new("colima", format!("Failed to parse status: {}", e))
+                })?;
                 Ok(status)
             }),
         )
@@ -209,12 +236,21 @@ impl VMManager for ColimaAdapter {
 
         match result {
             Ok(Ok(status)) => status,
-            Ok(Err(e)) => Err(AdapterError::new("colima", format!("Task join error: {}", e))),
-            Err(_) => Err(AdapterError::new("colima", "status timed out (daemon may be unresponsive)")),
+            Ok(Err(e)) => Err(AdapterError::new(
+                "colima",
+                format!("Task join error: {}", e),
+            )),
+            Err(_) => Err(AdapterError::new(
+                "colima",
+                "status timed out (daemon may be unresponsive)",
+            )),
         }
     }
 
     async fn ssh_command(&self, profile: &str) -> Result<Vec<String>, AdapterError> {
+        crate::host_features::HostFeature::ManagedVms
+            .require()
+            .map_err(|e| AdapterError::new("colima", e))?;
         let mut args = vec!["ssh".to_string()];
         if profile != "default" && !profile.is_empty() {
             args.push("--profile".into());
@@ -224,14 +260,17 @@ impl VMManager for ColimaAdapter {
     }
 
     async fn passthrough(&self, args: &[String]) -> Result<(), AdapterError> {
+        crate::host_features::HostFeature::ManagedVms
+            .require()
+            .map_err(|e| AdapterError::new("colima", e))?;
         let mut cmd = Self::colima_cmd();
         cmd.args(args);
-        
+
         // Inherit IO so terminal interactive features work
         cmd.stdin(std::process::Stdio::inherit())
-           .stdout(std::process::Stdio::inherit())
-           .stderr(std::process::Stdio::inherit());
-        
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
+
         match cmd.status() {
             Ok(status) => {
                 if !status.success() {
@@ -239,12 +278,18 @@ impl VMManager for ColimaAdapter {
                     std::process::exit(code);
                 }
                 Ok(())
-            },
+            }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    Err(AdapterError::new("colima", "Command not found. Is colima installed?"))
+                    Err(AdapterError::new(
+                        "colima",
+                        "Command not found. Is colima installed?",
+                    ))
                 } else {
-                    Err(AdapterError::new("colima", format!("Failed to execute passthrough: {}", e)))
+                    Err(AdapterError::new(
+                        "colima",
+                        format!("Failed to execute passthrough: {}", e),
+                    ))
                 }
             }
         }

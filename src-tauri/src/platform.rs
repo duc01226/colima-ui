@@ -50,26 +50,22 @@ pub fn detect_platform() -> PlatformInfo {
         false
     };
 
-    // On Windows, check if WSL is available
-    let wsl_available = if cfg!(target_os = "windows") {
-        Command::new("wsl")
-            .arg("--list")
-            .output()
-            .is_ok_and(|o| o.status.success())
-    } else {
-        false
-    };
+    // Native engine connections never probe or launch a WSL distribution.
+    let wsl_available = false;
 
     // Detect package managers
     let mut pms = Vec::new();
 
     // Homebrew (macOS + Linux)
-    let (brew_ok, brew_ver) = check_cmd_version("brew", &["--version"]);
-    pms.push(PackageManagerInfo {
-        name: "brew".to_string(),
-        available: brew_ok,
-        version: brew_ver,
-    });
+    #[cfg(not(windows))]
+    {
+        let (brew_ok, brew_ver) = check_cmd_version("brew", &["--version"]);
+        pms.push(PackageManagerInfo {
+            name: "brew".to_string(),
+            available: brew_ok,
+            version: brew_ver,
+        });
+    }
 
     // apt (Linux / WSL)
     if cfg!(target_os = "linux") || wsl {
@@ -81,13 +77,16 @@ pub fn detect_platform() -> PlatformInfo {
         });
     }
 
-    // nix (any platform)
-    let (nix_ok, nix_ver) = check_cmd_version("nix", &["--version"]);
-    pms.push(PackageManagerInfo {
-        name: "nix".to_string(),
-        available: nix_ok,
-        version: nix_ver,
-    });
+    // Native Windows uses an externally installed engine, not POSIX managers.
+    #[cfg(not(windows))]
+    {
+        let (nix_ok, nix_ver) = check_cmd_version("nix", &["--version"]);
+        pms.push(PackageManagerInfo {
+            name: "nix".to_string(),
+            available: nix_ok,
+            version: nix_ver,
+        });
+    }
 
     // Always offer manual
     pms.push(PackageManagerInfo {

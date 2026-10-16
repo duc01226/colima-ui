@@ -8,7 +8,9 @@
   import RowActions from "../components/RowActions.svelte";
   import { formatVolumeName } from "../lib/formatters";
   import { viewInTopology } from "../lib/topology-link";
-  import { blockingCapability, capabilityNotice } from "../store/capabilities.svelte";
+  import { blockingCapability, capabilityNotice, isDockerOnlyHost } from "../store/capabilities.svelte";
+  import { refetchAllResources } from "../lib/dataPoller";
+  import { recoveryDraft } from "../lib/recoveryDrafts.svelte";
 
   let searchTerm = $state("");
   let showCreate = $state(false);
@@ -22,7 +24,14 @@
   let confirm = $state<{ title: string; message: string; confirmLabel: string; danger: boolean; onConfirm: () => void; onCancel?: () => void } | null>(null);
   let runtimeName = $state("docker");
 
+  recoveryDraft("volume-input", () => ({ searchTerm, showCreate, newName, newDriver, selected: [...selected], inspecting }), (draft) => {
+    ({ searchTerm, showCreate, newName, newDriver } = draft);
+    selected = new Set(draft.selected.filter((name) => resourceState.volumes.some((v) => v.Name === name)));
+    if (draft.inspecting && resourceState.volumes.some((v) => v.Name === draft.inspecting)) void handleInspect(draft.inspecting);
+  });
+
   async function refreshVolumes() {
+    if (isDockerOnlyHost()) return refetchAllResources();
     try {
       const list = await volumesApi.listVolumes();
       resourceState.volumes = list;
@@ -55,10 +64,12 @@
     return () => window.removeEventListener("delete-volume", aiListener);
   });
 
+  let selectionFilterInitialized = false;
   $effect(() => {
     // Clear selection on search change
     if (searchTerm !== undefined) {
-      selected = new Set();
+      if (selectionFilterInitialized) selected = new Set();
+      selectionFilterInitialized = true;
     }
   });
 
@@ -247,7 +258,7 @@
   {#if resourceState.volumesLoading}
     <div style="text-align: center; padding: 40px; color: var(--text-muted);">{t('volumes.loading', { default: 'Loading volumes...' })}</div>
   {:else if filteredVolumes.length === 0}
-    {@const blocked = searchTerm ? undefined : blockingCapability("colima", "docker")}
+    {@const blocked = blockingCapability("colima", "docker")}
     <div style="text-align: center; padding: 40px; color: var(--text-muted);">
       {#if blocked}
         <div>{capabilityNotice(blocked).title}</div>

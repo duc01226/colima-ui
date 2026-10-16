@@ -24,7 +24,7 @@
 //! having to say so. With no watchers the loop makes no daemon calls at all.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -47,6 +47,68 @@ static INTERVAL_MS: AtomicU64 = AtomicU64::new(2000);
 /// rather than asserted-about: the difference between idle and sampling is a
 /// number here, not a judgement about CPU graphs.
 static TICKS: AtomicU64 = AtomicU64::new(0);
+
+const RECENT_TICKS: usize = 256;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TickObservation {
+    pub sequence: u64,
+    pub duration_ms: f64,
+    pub samples: usize,
+    pub failed: bool,
+}
+
+#[derive(Default)]
+struct Observation {
+    collecting: bool,
+    completed: VecDeque<TickObservation>,
+}
+impl Observation {
+    fn complete(&mut self, tick: TickObservation) {
+        self.collecting = false;
+        if self.completed.len() == RECENT_TICKS {
+            self.completed.pop_front();
+        }
+        self.completed.push_back(tick);
+    }
+}
+static OBSERVATION: LazyLock<Mutex<Observation>> =
+    LazyLock::new(|| Mutex::new(Observation::default()));
+
+/// Read-only operational diagnostics. Reading never subscribes, initializes an
+/// engine connection or performs a daemon request. Missing state is an error.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectorStatus {
+    pub process_id: u32,
+    pub version: String,
+    pub subscribers: usize,
+    pub interval_ms: u64,
+    pub started_ticks: u64,
+    pub collecting: bool,
+    pub recent_ticks: Vec<TickObservation>,
+    pub engine: Option<crate::engine_connection::EngineStatus>,
+}
+
+pub fn collector_status() -> Result<CollectorStatus, String> {
+    let observation = OBSERVATION
+        .lock()
+        .map_err(|_| "Metrics observation unavailable")?;
+    Ok(CollectorStatus {
+        process_id: std::process::id(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        subscribers: crate::sse::subscriber_count(TOPIC),
+        interval_ms: interval_ms(),
+        started_ticks: ticks_taken(),
+        collecting: observation.collecting,
+        recent_ticks: observation.completed.iter().cloned().collect(),
+        #[cfg(windows)]
+        engine: crate::engine_connection::cached_status(),
+        #[cfg(not(windows))]
+        engine: None,
+    })
+}
 
 /// How many samples the collector has taken.
 pub fn ticks_taken() -> u64 {
@@ -99,7 +161,10 @@ pub fn set_metric_writer(writer: MetricWriter) {
 
 /// Sampling period. Clamped: a zero would spin, and an hour would look broken.
 pub fn set_interval_ms(ms: u64) {
-    INTERVAL_MS.store(ms.clamp(MIN_INTERVAL_MS, MAX_INTERVAL_MS), Ordering::Relaxed);
+    INTERVAL_MS.store(
+        ms.clamp(MIN_INTERVAL_MS, MAX_INTERVAL_MS),
+        Ordering::Relaxed,
+    );
 }
 
 pub fn interval_ms() -> u64 {
@@ -127,9 +192,7 @@ fn parse_size(raw: &str) -> u64 {
     if s.is_empty() || s == "--" || s == "N/A" {
         return 0;
     }
-    let split = s
-        .find(|c: char| c.is_ascii_alphabetic())
-        .unwrap_or(s.len());
+    let split = s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len());
     let (number, unit) = s.split_at(split);
     let value: f64 = match number.trim().parse() {
         Ok(v) => v,
@@ -159,11 +222,18 @@ fn parse_pair(raw: &str) -> (u64, u64) {
 }
 
 fn parse_percent(raw: &str) -> f64 {
-    raw.trim().trim_end_matches('%').trim().parse().unwrap_or(0.0)
+    raw.trim()
+        .trim_end_matches('%')
+        .trim()
+        .parse()
+        .unwrap_or(0.0)
 }
 
 fn field(v: &serde_json::Value, key: &str) -> String {
-    v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Turn one `docker stats --format json` line into a sample.
@@ -223,7 +293,7 @@ pub fn parse_stats(raw: &str, ts: i64, instance: &str) -> Vec<MetricSample> {
 
 /// Previous CPU counters per container, for the delta the API does not give us.
 type CpuCounters = (u64, u64);
-static PREV_CPU: LazyLock<Mutex<HashMap<String, CpuCounters>>> =
+static PREV_CPU: LazyLock<Mutex<HashMap<(String, String), CpuCounters>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Docker's own CPU-percent formula.
@@ -249,7 +319,12 @@ fn memory_used(stats: &bollard::models::ContainerMemoryStats) -> u64 {
         .stats
         .as_ref()
         .and_then(|m| m.get("inactive_file").copied())
-        .or_else(|| stats.stats.as_ref().and_then(|m| m.get("total_inactive_file").copied()))
+        .or_else(|| {
+            stats
+                .stats
+                .as_ref()
+                .and_then(|m| m.get("total_inactive_file").copied())
+        })
         .unwrap_or(0);
     usage.saturating_sub(inactive)
 }
@@ -274,6 +349,7 @@ fn sample_from_api(
     name: &str,
     ts: i64,
     instance: &str,
+    cpu_scope: &str,
 ) -> MetricSample {
     let cpu_stats = stats.cpu_stats.as_ref();
     let cpu_usage = cpu_stats.and_then(|c| c.cpu_usage.as_ref());
@@ -293,28 +369,28 @@ fn sample_from_api(
 
     // No previous reading means no elapsed interval to divide by. Reporting 0%
     // matches what `docker stats` shows for a container's first sample.
-    let prev = PREV_CPU.lock().ok().and_then(|m| m.get(id).copied());
+    let key = (cpu_scope.to_string(), id.to_string());
+    let prev = PREV_CPU.lock().ok().and_then(|m| m.get(&key).copied());
     let cpu_pct = prev.map_or(0.0, |p| cpu_percent(cur, p, online));
     if let Ok(mut m) = PREV_CPU.lock() {
-        m.insert(id.to_string(), cur);
+        m.insert(key, cur);
     }
 
     let memory_stats = stats.memory_stats.as_ref();
     let mem_bytes = memory_stats.map_or(0, memory_used);
     let mem_limit_bytes = memory_stats.and_then(|m| m.limit).unwrap_or(0);
-    let (net_rx_bytes, net_tx_bytes) = stats
-        .networks
-        .as_ref()
-        .map_or((0, 0), |nets| {
-            nets.values()
-                .fold((0u64, 0u64), |(rx, tx), n| (
-                    rx + n.rx_bytes.unwrap_or(0),
-                    tx + n.tx_bytes.unwrap_or(0),
-                ))
-        });
+    let (net_rx_bytes, net_tx_bytes) = stats.networks.as_ref().map_or((0, 0), |nets| {
+        nets.values().fold((0u64, 0u64), |(rx, tx), n| {
+            (rx + n.rx_bytes.unwrap_or(0), tx + n.tx_bytes.unwrap_or(0))
+        })
+    });
 
     let blkio = stats.blkio_stats.as_ref();
-    let pids = stats.pids_stats.as_ref().and_then(|p| p.current).unwrap_or(0) as u32;
+    let pids = stats
+        .pids_stats
+        .as_ref()
+        .and_then(|p| p.current)
+        .unwrap_or(0) as u32;
 
     MetricSample {
         ts,
@@ -345,7 +421,13 @@ async fn sample_via_api(ts: i64, instance: &str) -> Option<Vec<MetricSample>> {
     use bollard::query_parameters::{ListContainersOptions, StatsOptions};
     use futures_util::StreamExt;
 
-    let docker = crate::docker_state::connect_bollard()?;
+    let docker = crate::docker_state::connect_bollard().await?;
+    #[cfg(windows)]
+    let generation = crate::engine_connection::read_generation().ok()?;
+    #[cfg(windows)]
+    let scope = format!("{instance}#{generation}");
+    #[cfg(not(windows))]
+    let scope = instance.to_string();
     let containers = docker
         .list_containers(Some(ListContainersOptions {
             all: false,
@@ -387,19 +469,21 @@ async fn sample_via_api(ts: i64, instance: &str) -> Option<Vec<MetricSample>> {
     let samples: Vec<MetricSample> = readings
         .into_iter()
         .flatten()
-        .map(|(id, name, stats)| sample_from_api(&stats, &id, &name, ts, instance))
+        .map(|(id, name, stats)| sample_from_api(&stats, &id, &name, ts, instance, &scope))
         .collect();
 
     // Forget containers that are gone, so the counter map cannot grow forever on
     // a machine that churns containers.
     if let Ok(mut prev) = PREV_CPU.lock() {
-        let live: std::collections::HashSet<String> = samples
-            .iter()
-            .map(|s| s.container_id.clone())
-            .collect();
-        prev.retain(|id, _| live.iter().any(|l| id.starts_with(l.as_str())));
+        let live: std::collections::HashSet<String> =
+            samples.iter().map(|s| s.container_id.clone()).collect();
+        prev.retain(|(origin, id), _| {
+            origin == &scope && live.iter().any(|l| id.starts_with(l.as_str()))
+        });
     }
 
+    #[cfg(windows)]
+    crate::engine_connection::ensure_generation(generation).ok()?;
     Some(samples)
 }
 
@@ -455,15 +539,17 @@ pub async fn sample_now() -> Result<Vec<MetricSample>, String> {
 }
 
 async fn collect_once() {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    let started = Instant::now();
+    let sequence = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    if let Ok(mut observation) = OBSERVATION.lock() {
+        observation.collecting = true;
+    }
 
     let samples = match sample_now().await {
         Ok(samples) => samples,
         Err(e) => {
-            crate::sse::publish_sse_event(
-                TOPIC,
-                &serde_json::json!({ "error": e, "samples": [] }),
-            );
+            crate::sse::publish_sse_event(TOPIC, &serde_json::json!({ "error": e, "samples": [] }));
+            complete_tick(sequence, started, 0, true);
             return;
         }
     };
@@ -482,6 +568,18 @@ async fn collect_once() {
             "intervalMs": interval_ms(),
         }),
     );
+    complete_tick(sequence, started, samples.len(), false);
+}
+
+fn complete_tick(sequence: u64, started: Instant, samples: usize, failed: bool) {
+    if let Ok(mut observation) = OBSERVATION.lock() {
+        observation.complete(TickObservation {
+            sequence,
+            duration_ms: started.elapsed().as_secs_f64() * 1000.0,
+            samples,
+            failed,
+        });
+    }
 }
 
 /// Start the loop. Call once, at startup.
@@ -515,6 +613,71 @@ pub fn spawn_collector() {
 mod tests {
     use super::*;
 
+    // TC021: observation cannot activate sampling, and storage stays bounded.
+    #[test]
+    fn observing_sampler_does_no_work_and_retains_bounded_completed_ticks() {
+        let before = ticks_taken();
+        for _ in 0..100 {
+            assert_eq!(collector_status().unwrap().started_ticks, before);
+        }
+        assert_eq!(ticks_taken(), before);
+        let mut observation = Observation::default();
+        for sequence in 1..=1000 {
+            observation.collecting = true;
+            observation.complete(TickObservation {
+                sequence,
+                duration_ms: 1.0,
+                samples: 20,
+                failed: false,
+            });
+        }
+        assert!(!observation.collecting);
+        assert_eq!(observation.completed.len(), RECENT_TICKS);
+        assert_eq!(observation.completed.front().unwrap().sequence, 745);
+        assert_eq!(observation.completed.back().unwrap().sequence, 1000);
+    }
+
+    // TC-WINUI-009: identical container IDs from another origin/generation
+    // cannot supply a CPU baseline. User-visible attribution stays unchanged.
+    #[test]
+    fn cpu_history_is_scoped_to_the_origin_and_recovery_generation() {
+        let id = "cpu-origin-recovery-fixture";
+        let stats = |total: u64, system: u64| -> bollard::models::ContainerStatsResponse {
+            serde_json::from_value(serde_json::json!({"cpu_stats":{"cpu_usage":{"total_usage":total},"system_cpu_usage":system,"online_cpus":1}})).unwrap()
+        };
+        let first = sample_from_api(
+            &stats(100, 1000),
+            id,
+            "owned",
+            1,
+            "selected",
+            "selected#one",
+        );
+        let next = sample_from_api(
+            &stats(200, 2000),
+            id,
+            "owned",
+            2,
+            "selected",
+            "selected#one",
+        );
+        let recovered = sample_from_api(
+            &stats(300, 3000),
+            id,
+            "owned",
+            3,
+            "selected",
+            "selected#two",
+        );
+        assert_eq!(first.cpu_pct, 0.0);
+        assert_eq!(next.cpu_pct, 10.0);
+        assert_eq!(recovered.cpu_pct, 0.0);
+        assert_eq!(recovered.instance, "selected");
+        if let Ok(mut map) = PREV_CPU.lock() {
+            map.retain(|(_, container), _| container != id);
+        }
+    }
+
     #[test]
     fn binary_and_si_suffixes_are_not_confused() {
         // Docker mixes them within one row; treating MiB as MB is a 4.9% error.
@@ -546,7 +709,10 @@ mod tests {
 
     #[test]
     fn pairs_split_on_the_slash() {
-        assert_eq!(parse_pair("683MiB / 1.913GiB"), (716_177_408, 2_054_068_109));
+        assert_eq!(
+            parse_pair("683MiB / 1.913GiB"),
+            (716_177_408, 2_054_068_109)
+        );
         assert_eq!(parse_pair("450kB / 234kB"), (450_000, 234_000));
         assert_eq!(parse_pair("0B / 0B"), (0, 0));
         // Malformed input yields zeros, not a panic.
@@ -656,7 +822,10 @@ mod tests {
     /// appear in this file and the check would fail on its own source.
     #[test]
     fn this_module_does_not_reference_the_paid_build() {
-        let forbidden = [format!("crate::{}", "pro"), format!("crate::{}", "subscription")];
+        let forbidden = [
+            format!("crate::{}", "pro"),
+            format!("crate::{}", "subscription"),
+        ];
         let source = include_str!("metrics_collector.rs");
         for line in source.lines() {
             // Comments may name the paid build; only code may not reach into it.

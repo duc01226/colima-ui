@@ -87,7 +87,7 @@ struct LimaResources {
 /// Returns `(cpus, memory_bytes, disk_bytes)`; any field lima omits comes back 0.
 fn read_lima_resources(lima_dir: &Path) -> Option<(u32, u64, u64)> {
     let content = std::fs::read_to_string(lima_dir.join("lima.yaml")).ok()?;
-    let res: LimaResources = serde_yml::from_str(&content).ok()?;
+    let res: LimaResources = serde_norway::from_str(&content).ok()?;
     Some((
         res.cpus,
         crate::commands::engine_resources::parse_size_to_bytes(&res.memory).unwrap_or(0),
@@ -125,7 +125,7 @@ fn read_instance(colima_home: &Path, profile: &str) -> Option<ColimaInstance> {
     // Read and parse the colima.yaml config
     let config: ColimaConfig = if config_path.exists() {
         let content = std::fs::read_to_string(&config_path).ok()?;
-        serde_yml::from_str(&content).unwrap_or_default()
+        serde_norway::from_str(&content).unwrap_or_default()
     } else {
         // No config file — if lima dir also doesn't exist, this is a stale/deleted profile
         if !lima_dir.exists() {
@@ -232,6 +232,9 @@ fn check_k3s_via_kubectl(profile: &str) -> bool {
 /// This is ~60,000x faster than `colima list --json` because it avoids
 /// spawning a subprocess that triggers macOS system_profiler.
 pub fn list_instances_fast() -> Vec<ColimaInstance> {
+    if cfg!(windows) {
+        return Vec::new();
+    }
     let home = colima_home();
 
     if !home.exists() {

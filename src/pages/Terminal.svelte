@@ -1,11 +1,16 @@
 <script lang="ts">
+  import { capabilitiesState, isDockerOnlyHost, supportsHostVms, supportsKubernetes } from "../store/capabilities.svelte";
+  import { engineConnectionState } from "../lib/engineConnection.svelte";
+  import { refetchAllResources } from "../lib/dataPoller";
   import { onMount } from "svelte";
-  import { dashboardState, uiState } from "../store.svelte";
+  import { dashboardState, dockerState, uiState } from "../store.svelte";
   import Icon from "../components/Icon.svelte";
   import { t } from "../lib/i18n.svelte";
-  import { k8sApi } from "../lib/api";
+  import { k8sApi, dockerApi } from "../lib/api";
   import { parseItems } from "../lib/k8sUtils";
-  import { sessionLabel, type SessionKind } from "../lib/terminal-transport";
+  import { containerTerminalTarget, sessionLabel, type SessionKind } from "../lib/terminal-transport";
+  import { reportError } from "../lib/errorReporter";
+  import { isRunningInTauri } from "../lib/env";
   import TerminalInstance from "./TerminalInstance.svelte";
 
   // The API origin and bearer token used to be threaded down to every tab,
@@ -44,9 +49,49 @@
   let tabs = $state<TerminalTab[]>([]);
   let activeTab = $state<string | null>(null);
   let showPicker = $state(false);
+  let picker = $state<HTMLDialogElement | null>(null);
+  let newSessionButton = $state<HTMLButtonElement | null>(null);
+  let opening = $state(false);
+  let openRequest = 0;
+  let dockerLoading = $state(false);
+  let dockerError = $state('');
+  let dockerLoaded = $state(false);
+  const currentDockerTargets = $derived(!!capabilitiesState.platform && (!isDockerOnlyHost() ||
+    (!!engineConnectionState.snapshot?.active.ready && dockerState.originGeneration !== null && dockerState.originGeneration === engineConnectionState.snapshot.active.generation)));
+  let containers = $derived((currentDockerTargets ? dockerState.containers : []).filter(c => c.State === 'running'));
+  const targetError = $derived(!capabilitiesState.platform ? t('connection.platform_checking') : isDockerOnlyHost()
+    ? dockerError || dockerState.error || (currentDockerTargets ? '' : t('connection.unavailable_title')) : dockerError);
+  const targetsLoaded = $derived(isDockerOnlyHost() ? currentDockerTargets && !dockerState.error : dockerLoaded);
 
-  let instances = $derived(dashboardState.colimaInstances.filter(i => i.status === "Running"));
-  let limaVMs = $derived(dashboardState.linuxVMs.filter(v => v.status === "Running"));
+  async function loadDockerTargets() {
+    if (dockerLoading || !capabilitiesState.platform) return;
+    dockerLoading = true; dockerError = '';
+    try {
+      if (isDockerOnlyHost()) await refetchAllResources();
+      else { dockerState.containers = await dockerApi.listContainers(true); dockerLoaded = true; }
+    }
+    catch (error) { dockerError = String(error); }
+    finally { dockerLoading = false; }
+  }
+  async function openDocker(c: { Id: string; Names: string }) {
+    if (opening) return;
+    opening = true;
+    const request = ++openRequest;
+    try { const kind = await containerTerminalTarget(c.Id, c.Names); if (request === openRequest) openSession(kind); }
+    catch (error) { dockerError = String(error); reportError(error, { action: t('terminal.open_container', { default: 'Open terminal' }) }); }
+    finally { opening = false; }
+  }
+  $effect(() => {
+    if (!showPicker || !picker) return;
+    const dialog = picker;
+    dialog.showModal();
+    return () => { dialog.close(); newSessionButton?.focus(); };
+  });
+  function closePicker() { ++openRequest; showPicker = false; }
+
+
+  let instances = $derived((supportsHostVms() ? dashboardState.colimaInstances : []).filter(i => i.status === "Running"));
+  let limaVMs = $derived((supportsHostVms() ? dashboardState.linuxVMs : []).filter(v => v.status === "Running"));
 
   /**
    * Container targets from the connected cluster.
@@ -71,9 +116,10 @@
   // On mount, not on picker-open: `hasRunning` gates whether the New Session
   // button renders at all, so the cluster has to be counted before the user
   // reaches for it.
-  onMount(loadPodTargets);
+  onMount(() => { loadPodTargets(); loadDockerTargets(); });
 
   async function loadPodTargets() {
+    if (!supportsKubernetes()) return;
     if (podsLoading) return;
     podsLoading = true;
     podsError = "";
@@ -110,7 +156,7 @@
 
   /** Anything at all that a session could attach to. */
   let hasRunning = $derived(
-    instances.length > 0 || limaVMs.length > 0 || podTargets.length > 0,
+    containers.length > 0 || instances.length > 0 || limaVMs.length > 0 || podTargets.length > 0,
   );
 
   function addTab(profile: string, vmType: "colima" | "lima" = "colima") {
@@ -128,13 +174,15 @@
    * VM would open a dialog containing a single row.
    */
   function openOrPick() {
-    const total = instances.length + limaVMs.length + podTargets.length;
+    const total = containers.length + instances.length + limaVMs.length + podTargets.length;
     if (total !== 1) {
       showPicker = true;
       return;
     }
 
-    if (instances.length === 1) {
+    if (containers.length === 1) {
+      void openDocker(containers[0]);
+    } else if (instances.length === 1) {
       const name = instances[0].name;
       addTab(name === "colima" ? "default" : name.replace("colima-", ""), "colima");
     } else if (limaVMs.length === 1) {
@@ -160,7 +208,7 @@
    * reattaches to its existing pty instead of spawning a second one.
    */
   function openSession(kind: SessionKind) {
-    const id = `term-${Date.now()}`;
+    const id = `term-${crypto.randomUUID()}`;
     tabs = [...tabs, { id, label: sessionLabel(kind), kind }];
     activeTab = id;
     showPicker = false;
@@ -188,18 +236,7 @@
 <div class="content-header" data-tauri-drag-region>
   <h1>{t('terminal.title', { default: 'Terminal' })}</h1>
   <div class="content-header-actions">
-    <button class="btn btn-primary" onclick={() => {
-      if (instances.length + limaVMs.length === 1) {
-        if (instances.length === 1) {
-          const name = instances[0].name;
-          addTab(name === "colima" ? "default" : name.replace("colima-", ""), "colima");
-        } else {
-          addTab(limaVMs[0].name, "lima");
-        }
-      } else {
-        showPicker = true;
-      }
-    }}>
+    <button bind:this={newSessionButton} class="btn btn-primary" disabled={opening || !isRunningInTauri()} onclick={openOrPick}>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
       </svg>
@@ -212,20 +249,9 @@
 {#if tabs.length > 0}
   <div style="display: flex; align-items: center; gap: 0; border-bottom: 1px solid var(--border-primary); background: var(--bg-content); padding-left: 12px; flex-shrink: 0; overflow: auto;">
     {#each tabs as tab (tab.id)}
-      <div
-        style="display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: {activeTab === tab.id ? '2px solid var(--accent-blue)' : '2px solid transparent'}; color: {activeTab === tab.id ? 'var(--text-primary)' : 'var(--text-secondary)'}; cursor: pointer; font-size: var(--text-sm); font-weight: {activeTab === tab.id ? 600 : 400}; white-space: nowrap; transition: all 150ms;"
-        onclick={() => activeTab = tab.id}
-      >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
-        </svg>
-        {tab.label}
-        <span
-          style="margin-left: 4px; opacity: 0.5; cursor: pointer; font-size: var(--text-xs);"
-          onclick={(e) => { e.stopPropagation(); removeTab(tab.id); }}
-        >
-          <Icon name="Close" size={10} />
-        </span>
+      <div class="terminal-tab">
+        <button class="btn btn-ghost" class:selected={activeTab === tab.id} aria-pressed={activeTab === tab.id} onclick={() => activeTab = tab.id}>{tab.label}</button>
+        <button class="btn btn-icon btn-ghost" aria-label={t('terminal.close_named', { default: 'Close terminal for {name}', name: tab.label })} onclick={() => { removeTab(tab.id); newSessionButton?.focus(); }}><Icon name="Close" size={14} /></button>
       </div>
     {/each}
   </div>
@@ -242,7 +268,7 @@
       </div>
       <div class="empty-state-title">{t('terminal.no_sessions', { default: 'No terminal sessions' })}</div>
       <div class="empty-state-text">
-        {t('terminal.instructions', { default: 'Open a new SSH session to a running instance.' })}
+        {t('terminal.instructions', { default: 'Open a terminal in a running container or choose another available target.' })}
       </div>
       {#if hasRunning}
         <button class="btn btn-primary" onclick={() => {
@@ -251,15 +277,14 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
           </svg>
-          New Session
+          {t('terminal.new_session', { default: 'New Session' })}
         </button>
       {:else}
         <p style="font-size: var(--text-xs); color: var(--text-muted); line-height: 1.7;">
           {#if podsLoading}
             Looking for targets…
           {:else}
-            No running VM and no cluster container.<br />
-            Run <code>colima start</code>, or connect a Kubernetes cluster.
+            {t('terminal.no_targets', { default: 'No running targets. Start a container in Containers, then open its terminal.' })}
           {/if}
         </p>
       {/if}
@@ -272,104 +297,41 @@
           kind={tab.kind}
           active={activeTab === tab.id}
           {termTheme}
+          onFocusExit={() => newSessionButton?.focus()}
         />
       </div>
     {/each}
   {/if}
 </div>
 
-<!-- Instance Picker Modal -->
+<!-- The native modal dialog owns inert background, Escape and focus containment. -->
 {#if showPicker}
-  <div role="button" tabindex="0" class="modal-overlay" onkeydown={(e) => e.key === 'Enter' && e.currentTarget.click()} onclick={() => showPicker = false}>
-    <div role="button" tabindex="0" class="modal" onkeydown={(e) => e.key === 'Enter' && e.currentTarget.click()} onclick={(e) => e.stopPropagation()} style="width: min(400px, 90vw);">
-      <div class="modal-header">
-        <h2 class="modal-title">Select Instance</h2>
-        <button class="btn btn-icon btn-ghost" onclick={() => showPicker = false}><Icon name="Close" size={16} /></button>
-      </div>
-      <div style="display: flex; flex-direction: column; gap: 4px;">
-        {#if instances.length > 0}
-          <div style="font-size: var(--text-xs); color: var(--text-muted); padding: 8px 16px 4px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">
-            Colima Instances
-          </div>
-        {/if}
-        {#each instances as inst (inst.name)}
-          <div
-            class="nav-item"
-            style="padding: 12px 16px; border-radius: var(--radius-md);"
-            onclick={() => addTab(inst.name === "colima" ? "default" : inst.name.replace("colima-", ""), "colima")}
-          >
-            <div style="width: 8px; height: 8px; border-radius: 50%; background: var(--status-running); box-shadow: 0 0 6px var(--status-running);"></div>
-            <div>
-              <div style="font-weight: 500;">{inst.name}</div>
-              <div style="font-size: var(--text-xs); color: var(--text-muted);">
-                {inst.runtime} · {inst.arch} · {inst.cpus} CPU
-              </div>
-            </div>
-          </div>
-        {/each}
-        {#if limaVMs.length > 0}
-          <div style="font-size: var(--text-xs); color: var(--text-muted); padding: 8px 16px 4px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; border-top: {instances.length > 0 ? '1px solid var(--border-primary)' : 'none'}; margin-top: {instances.length > 0 ? 4 : 0}px;">
-            Linux VMs (Lima)
-          </div>
-        {/if}
-        {#each limaVMs as vm (vm.name)}
-          <div
-            class="nav-item"
-            style="padding: 12px 16px; border-radius: var(--radius-md);"
-            onclick={() => addTab(vm.name, "lima")}
-          >
-            <div style="width: 8px; height: 8px; border-radius: 50%; background: var(--status-running); box-shadow: 0 0 6px var(--status-running);"></div>
-            <div>
-              <div style="font-weight: 500;">🐧 {vm.name}</div>
-              <div style="font-size: var(--text-xs); color: var(--text-muted);">
-                {vm.arch} · {vm.cpus} CPU · {vm.memory}
-              </div>
-            </div>
-          </div>
-        {/each}
-        {#if podTargets.length > 0}
-          <div style="font-size: var(--text-xs); color: var(--text-muted); padding: 8px 16px 4px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; border-top: {instances.length + limaVMs.length > 0 ? '1px solid var(--border-primary)' : 'none'}; margin-top: {instances.length + limaVMs.length > 0 ? 4 : 0}px;">
-            Kubernetes containers
-          </div>
-        {/if}
-        {#each podTargets as p (p.label)}
-          <div
-            class="nav-item"
-            style="padding: 12px 16px; border-radius: var(--radius-md);"
-            onclick={() => openPod(p)}
-          >
-            <div style="width: 8px; height: 8px; border-radius: 50%; background: var(--status-running); box-shadow: 0 0 6px var(--status-running);"></div>
-            <div style="min-width: 0;">
-              <div style="font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{p.pod}</div>
-              <div style="font-size: var(--text-xs); color: var(--text-muted);">
-                {p.namespace}{p.container ? ` · ${p.container}` : ""}
-              </div>
-            </div>
-          </div>
-        {/each}
-
-        {#if podsLoading && !hasRunning}
-          <p style="text-align: center; color: var(--text-muted); padding: 20px; font-size: var(--text-sm);">
-            Looking for targets…
-          </p>
-        {:else if !hasRunning}
-          <!-- Says which sources were checked and what to do, rather than
-               implying the only possible target is a Colima VM. -->
-          <p style="text-align: center; color: var(--text-muted); padding: 20px 16px; font-size: var(--text-sm); line-height: 1.6;">
-            Nothing to connect to.<br />
-            Start a VM with <code>colima start</code>, or connect a Kubernetes
-            cluster to open a shell in a container.
-          </p>
-        {/if}
-
-        {#if podsError}
-          <!-- "The cluster query failed" and "the cluster has no pods" look
-               identical from the empty list, so the failure has to say so. -->
-          <p style="padding: 0 16px 16px; font-size: var(--text-xs); color: var(--accent-yellow); line-height: 1.6;">
-            Could not list cluster containers: {podsError}
-          </p>
-        {/if}
-      </div>
+  <dialog bind:this={picker} class="modal terminal-picker" oncancel={closePicker} onclose={closePicker} aria-labelledby="terminal-picker-title">
+    <div class="modal-header">
+      <h2 id="terminal-picker-title" class="modal-title">{t('terminal.select_target', { default: 'Select a terminal target' })}</h2>
+      <button class="btn btn-ghost" onclick={closePicker}>{t('common.cancel', { default: 'Cancel' })}</button>
     </div>
-  </div>
+    <h3>{t('sidebar.containers', { default: 'Containers' })}</h3>
+    {#if dockerLoading}<p role="status">{t('terminal.loading_containers', { default: 'Loading Docker containers…' })}</p>{/if}
+    {#if targetError}<p role="alert">{targetError}</p><button class="btn btn-ghost" onclick={loadDockerTargets}>{t('common.retry', { default: 'Retry' })}</button>{/if}
+    {#each containers as c (c.Id)}
+      <button class="btn btn-ghost target-button" disabled={opening} onclick={() => openDocker(c)}>{c.Names} <span>{c.Id.slice(0, 12)}</span></button>
+    {/each}
+    {#if targetsLoaded && !targetError && containers.length === 0}<p>{t('terminal.no_containers', { default: 'No running containers. Open Containers to start one.' })}</p>{/if}
+    {#each instances as inst (inst.name)}<button class="btn btn-ghost target-button" onclick={() => addTab(inst.name === 'colima' ? 'default' : inst.name.replace('colima-', ''), 'colima')}>Colima · {inst.name}</button>{/each}
+    {#each limaVMs as vm (vm.name)}<button class="btn btn-ghost target-button" onclick={() => addTab(vm.name, 'lima')}>Lima · {vm.name}</button>{/each}
+    {#each podTargets as p (p.label)}<button class="btn btn-ghost target-button" onclick={() => openPod(p)}>Kubernetes · {p.label}</button>{/each}
+    {#if podsError}<p>{t('terminal.cluster_unavailable', { default: 'Cluster targets are unavailable.' })}</p>{/if}
+    {#if opening}<p role="status">{t('terminal.checking_target', { default: 'Checking container and engine…' })}</p>{/if}
+  </dialog>
 {/if}
+
+<style>
+  .terminal-tab { display: flex; align-items: center; gap: 4px; }
+  .selected { border-bottom-color: var(--accent-blue); color: var(--text-primary); }
+  .terminal-picker { width: min(440px, 90vw); max-height: 80vh; overflow: auto; color: var(--text-primary); background: var(--bg-card); }
+  .terminal-picker::backdrop { background: var(--bg-overlay); }
+  .target-button { width: 100%; justify-content: space-between; white-space: normal; text-align: left; margin-bottom: 4px; overflow-wrap: anywhere; }
+  .target-button span, .terminal-picker p { color: var(--text-secondary); }
+  .terminal-picker h3 { font-size: var(--text-sm); }
+</style>

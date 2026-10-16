@@ -82,10 +82,14 @@ fn parse_percent(input: &str) -> f64 {
 
 /// Run an engine command, returning stdout only when it exited successfully.
 fn run(args: &[&str]) -> Option<String> {
-    let output = crate::commands::runtime::get_runtime_cmd()
-        .args(args)
-        .output()
-        .ok()?;
+    let mut command = crate::commands::runtime::get_runtime_cmd().ok()?;
+    command.args(args);
+    let output = crate::child_process::capture(
+        command,
+        std::time::Duration::from_secs(10),
+        16 * 1024 * 1024,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -152,7 +156,10 @@ fn collect_disk(res: &mut EngineResources) {
         let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        res.disk_used_bytes += entry["Size"].as_str().and_then(parse_size_to_bytes).unwrap_or(0);
+        res.disk_used_bytes += entry["Size"]
+            .as_str()
+            .and_then(parse_size_to_bytes)
+            .unwrap_or(0);
         res.disk_reclaimable_bytes += entry["Reclaimable"]
             .as_str()
             .and_then(parse_size_to_bytes)

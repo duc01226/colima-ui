@@ -22,6 +22,8 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 export function handleGlobalKeydown(e: KeyboardEvent): void {
+  // Escape/editor keys belong to the shell too. Terminal has a visible focus-exit chord.
+  if (e.target instanceof HTMLElement && e.target.closest(".xterm")) return;
   const meta = e.metaKey || e.ctrlKey;
 
   // Escape leaves the input first, and only closes a panel on the next press.

@@ -1,0 +1,1623 @@
+{
+  "purpose": "Changed high-value rule seed inventory; parent review reconciles changed-core coverage. No native acceptance from a listed seed.",
+  "seeds": [
+    {
+      "id": "original-engine-identity",
+      "file": "src-tauri/src/engine_connection.rs",
+      "from": "self.original.as_deref().is_none_or(|old| old == id)",
+      "to": "true",
+      "case": "TC-WINUI-026",
+      "intent": "replacement daemon cannot authorize original-engine work",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "engine_connection::tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "old-generation-refused",
+      "file": "src-tauri/src/engine_connection.rs",
+      "from": "self.read_generation()? == generation",
+      "to": "true",
+      "case": "TC-WINUI-026",
+      "intent": "pre-loss reads cannot publish after recovery",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "engine_connection::tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "late-check-order",
+      "file": "src-tauri/src/engine_connection.rs",
+      "from": "if check < self.applied_check {\n            return Err",
+      "to": "if false {\n            return Err",
+      "case": "TC-WINUI-026",
+      "intent": "late success cannot supersede a newer loss",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "engine_connection::tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "target-overrides-refused",
+      "file": "src-tauri/src/engine_connection.rs",
+      "from": "if !matches!(arg.as_str(), \"--debug\" | \"-D\" | \"--help\" | \"--version\")",
+      "to": "if false",
+      "case": "TC-WINUI-025",
+      "intent": "global CLI flags cannot retarget captured engine",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "engine_connection::tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "shared-output-overwrite",
+      "file": "src-tauri/src/validation.rs",
+      "from": "if candidate.exists() && !overwrite {",
+      "to": "if false {",
+      "case": "TC-WINUI-028",
+      "intent": "prior destination remains without explicit overwrite",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "validation::tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "terminal-cap",
+      "file": "src-tauri/src/terminal_session.rs",
+      "from": "if !reconnect && count >= MAX_SESSIONS {",
+      "to": "if !reconnect && count > MAX_SESSIONS {",
+      "case": "TC-WINUI-013",
+      "intent": "sixteenth occupied slot refuses a new session, reconnect remains legal",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "terminal_session::tests::terminal_session_cap",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "terminal-utf8-boundary",
+      "file": "src-tauri/src/terminal_session.rs",
+      "from": "while start < bytes.len() && bytes[start] & 0xc0 == 0x80 {",
+      "to": "while false {",
+      "case": "TC-WINUI-013",
+      "intent": "bounded output never begins inside a UTF8 codepoint",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "terminal_session::tests::output_limit",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "transfer-live-claim-retained",
+      "file": "src-tauri/src/transfer_registry.rs",
+      "from": "None => true,\n    });",
+      "to": "None => false,\n    });",
+      "case": "TC-WINUI-028",
+      "intent": "registering later work cannot prune unfinished destination claims",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "transfer_registry::tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "transfer-first-outcome",
+      "file": "src-tauri/src/transfer_registry.rs",
+      "from": "if entry.snapshot.status.is_terminal() || !status.is_terminal() {\n                return entry.snapshot.status;\n            }",
+      "to": "if false { return entry.snapshot.status; }",
+      "case": "TC-WINUI-027",
+      "intent": "ended transfers cannot change their first actual outcome",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "transfer_registry::tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "transfer-missing-cannot-start",
+      "file": "src-tauri/src/transfer_registry.rs",
+      "from": "None => false,\n    }\n}\n\npub fn update_bytes",
+      "to": "None => true,\n    }\n}\n\npub fn update_bytes",
+      "case": "TC-WINUI-027",
+      "intent": "missing/expired work cannot acquire authority to spawn",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "transfer_registry::tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "restart-no-implicit-cancel",
+      "file": "src-tauri/src/transfer_registry.rs",
+      "from": "if !cancel_active && map.values().any(|e| !e.snapshot.status.is_terminal()) {",
+      "to": "if false {",
+      "case": "TC-WINUI-027",
+      "intent": "active work blocks unapproved restart and refusal keeps admission available",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "transfer_registry::tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "private-instance-mismatch",
+      "file": "src-tauri/src/api_reference.rs",
+      "from": "if reference.instance != instance",
+      "to": "if false",
+      "case": "TC-WINUI-014",
+      "intent": "private reference must name the current selected app instance",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "api_reference::tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "private-port-range",
+      "file": "src-tauri/src/api_reference.rs",
+      "from": "(11420..=11429).contains(&reference.port)",
+      "to": "(1..=65535).contains(&reference.port)",
+      "case": "TC-WINUI-014",
+      "intent": "private handoff cannot select an arbitrary service port",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "api_reference::tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "host-feature-authority",
+      "file": "src-tauri/src/host_features.rs",
+      "from": "if !windows {",
+      "to": "if true {",
+      "case": "TC-WINUI-029",
+      "intent": "installed tools do not grant native Windows VM/Kubernetes/install authority",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "host_features::tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "file-no-replace-publication",
+      "file": "src-tauri/src/streaming_cmd.rs",
+      "from": "if overwrite {\n        std::fs::rename(partial, destination)?;",
+      "to": "if true {\n        std::fs::rename(partial, destination)?;",
+      "case": "TC-WINUI-028",
+      "intent": "destination created during streaming is preserved without overwrite permission",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "streaming_cmd::tests::a_destination_created",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "sbom-shared-claim",
+      "file": "src-tauri/src/commands/security_scan.rs",
+      "from": "registry::register(&job, \"sbom\", image_ref, None, Some(dest.clone()))?;",
+      "to": "registry::register(&job, \"sbom\", image_ref, None, None)?;",
+      "case": "TC-WINUI-012",
+      "intent": "SBOM and TAR cannot concurrently claim the same output",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "commands::security_scan::tests::sbom_exports_share",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "metrics-origin-cpu",
+      "file": "src-tauri/src/commands/metrics_collector.rs",
+      "from": "let key = (cpu_scope.to_string(), id.to_string());",
+      "to": "let key = (instance.to_string(), id.to_string());",
+      "case": "TC-WINUI-009",
+      "intent": "reused container ID cannot reuse a different origin CPU baseline",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "commands::metrics_collector::tests::cpu_history",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "metrics-period-clamp",
+      "file": "src-tauri/src/commands/metrics_collector.rs",
+      "from": "ms.clamp(MIN_INTERVAL_MS, MAX_INTERVAL_MS)",
+      "to": "ms",
+      "case": "TC-WINUI-021",
+      "intent": "invalid periods cannot spin or make monitoring appear broken",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "commands::metrics_collector::tests::the_interval",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "metrics-bounded-observations",
+      "file": "src-tauri/src/commands/metrics_collector.rs",
+      "from": "if self.completed.len() == RECENT_TICKS {\n            self.completed.pop_front();\n        }",
+      "to": "if false { self.completed.pop_front(); }",
+      "case": "TC-WINUI-021",
+      "intent": "diagnostic observation history stays bounded under long uptime",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "commands::metrics_collector::tests::observing_sampler",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "metrics-cpu-budget",
+      "file": "src-tauri/tests/support/metrics_budget.rs",
+      "from": "if cpu >= budget || p95 >= 2000.0",
+      "to": "if p95 >= 2000.0",
+      "case": "TC-WINUI-021",
+      "intent": "exceeding fixed CPU budgets cannot become a successful qualification",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "windows_metrics_cost::budget::tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "metrics-prefleet-max",
+      "file": "src-tauri/tests/support/metrics_budget.rs",
+      "from": "let baseline = *baseline.iter().max().unwrap();",
+      "to": "let baseline = *baseline.iter().min().unwrap();",
+      "case": "TC-WINUI-021",
+      "intent": "RSS arithmetic uses the full pre-fleet maximum without rebasing",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "windows_metrics_cost::budget::tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "engine-candidate-epoch",
+      "file": "src/lib/engineConnection.svelte.ts",
+      "from": "if (epoch !== candidateEpoch) return;",
+      "to": "if (false) return;",
+      "case": "TC-WINUI-004",
+      "intent": "late check cannot certify another edited selection",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/lib/engineConnection.test.ts"
+      ]
+    },
+    {
+      "id": "engine-check-before-save",
+      "file": "src/lib/engineConnection.svelte.ts",
+      "from": "if (!engineConnectionState.checked?.ready || engineConnectionState.checkedContext !== context) {",
+      "to": "if (false) {",
+      "case": "TC-WINUI-004",
+      "intent": "unverified selection cannot be saved",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/lib/engineConnection.test.ts"
+      ]
+    },
+    {
+      "id": "disposed-run-owner",
+      "file": "src/lib/dataPoller.ts",
+      "from": "return current === run && !run.closed && run.revision === revision;",
+      "to": "return true;",
+      "case": "TC-WINUI-035",
+      "intent": "disposed/old generation callbacks cannot publish into current resources",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/lib/dataPoller.test.ts"
+      ]
+    },
+    {
+      "id": "release-full-semver",
+      "file": "scripts/release-version.mjs",
+      "from": "!semver.test(version)",
+      "to": "false",
+      "case": "TC-WINUI-023",
+      "intent": "malformed/shell-bearing versions are refused before writes",
+      "command": "node",
+      "args": [
+        "--test",
+        "scripts/release-version.node-test.mjs"
+      ]
+    },
+    {
+      "id": "candidate-no-updater-secret",
+      "file": "scripts/windows-build.mjs",
+      "from": "delete env.TAURI_SIGNING_PRIVATE_KEY;",
+      "to": "void env.TAURI_SIGNING_PRIVATE_KEY;",
+      "case": "TC-WINUI-023",
+      "intent": "unsigned candidate cannot inherit updater signing authority",
+      "command": "node",
+      "args": [
+        "--test",
+        "scripts/windows-build.node-test.mjs"
+      ]
+    },
+    {
+      "id": "accepted-cancel-before-publish",
+      "file": "src-tauri/src/transfer_registry.rs",
+      "from": "|| entry.cancel_requested\n            || entry.snapshot.status.is_terminal()",
+      "to": "|| false\n            || entry.snapshot.status.is_terminal()",
+      "case": "TC-WINUI-028",
+      "intent": "accepted cancellation prevents output publication",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "transfer_registry::tests::accepted_cancel",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "nonfile-cancel-truth",
+      "file": "src-tauri/src/transfer_registry.rs",
+      "from": "if status == TransferStatus::Success && entry.cancel_requested {",
+      "to": "if false {",
+      "case": "TC-WINUI-027",
+      "intent": "accepted cancel cannot become nonfile success",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "transfer_registry::tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "late-cancel-disarmed",
+      "file": "src-tauri/src/commands/file_transfer.rs",
+      "from": "if !registry::is_unfinished(job_id) {",
+      "to": "if false {",
+      "case": "TC-WINUI-027",
+      "intent": "late accepted cancel cannot leak an armed cancel into reused stream identity",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "commands::file_transfer::tests::cancellation_at_file_publication",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "retained-id-cannot-replace-owner",
+      "file": "src-tauri/src/transfer_registry.rs",
+      "from": "if map.contains_key(job_id) {",
+      "to": "if false {",
+      "case": "TC-WINUI-027",
+      "intent": "reused ID cannot replace existing publication and outcome owner",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "transfer_registry::tests::accepted_cancel",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "quota-counts-only-machine-attempts",
+      "file": "src-tauri/src/commands/self_heal.rs",
+      "from": ".filter(|o| o.spends_quota())",
+      "to": ".filter(|_| true)",
+      "case": "TC-WINUI-017",
+      "intent": "advice and blocked actions cannot extend the automatic-action quota",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "commands::self_heal::tests::quota_query_counts",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "quota-rule-isolation",
+      "file": "src-tauri/src/commands/self_heal.rs",
+      "from": "WHERE rule_id = ?1 AND ts >= ?2",
+      "to": "WHERE (?1 IS NOT NULL) AND ts >= ?2",
+      "case": "TC-WINUI-017",
+      "intent": "another rules actions do not spend this rules allowance",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "commands::self_heal::tests::quota_query_counts",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "quota-inclusive-window",
+      "file": "src-tauri/src/commands/self_heal.rs",
+      "from": "AND ts >= ?2 AND outcome IN",
+      "to": "AND ts > ?2 AND outcome IN",
+      "case": "TC-WINUI-017",
+      "intent": "an action on the exact hour boundary still spends quota",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "commands::self_heal::tests::quota_query_includes",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "quota-unreadable-fails-closed",
+      "file": "src-tauri/src/commands/self_heal.rs",
+      "from": ".unwrap_or(i64::MAX) // Unreadable quota blocks rather than permits.",
+      "to": ".unwrap_or(0) // seeded defect",
+      "case": "TC-WINUI-017",
+      "intent": "unreadable persisted quota cannot authorize an automatic action",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "commands::self_heal::tests::unreadable_quota",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "terminal-incomplete-utf8-carry",
+      "file": "src-tauri/src/terminal_session.rs",
+      "from": "None => return (out, rest[valid..].to_vec()),",
+      "to": "None => return (out, Vec::new()),",
+      "case": "TC-WINUI-013",
+      "intent": "chunk boundaries never discard an incomplete valid character",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "terminal_session::tests::valid_utf8_round_trips",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "child-output-overflow-signalled",
+      "file": "src-tauri/src/child_process.rs",
+      "from": "if keep < count {",
+      "to": "if false {",
+      "case": "TC-WINUI-011",
+      "intent": "bounded truncated child output is never reported successful",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "child_process::tests::literal_output",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "child-deadline-cause",
+      "file": "src-tauri/src/child_process.rs",
+      "from": "io::ErrorKind::TimedOut, \"Process timed out\"",
+      "to": "io::ErrorKind::Other, \"Process timed out\"",
+      "case": "TC-WINUI-016",
+      "intent": "deadline refusal remains distinguishable from other execution failures",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "child_process::tests::deadline_removes",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "stream-scratch-exclusive",
+      "file": "src-tauri/src/streaming_cmd.rs",
+      "from": ".create_new(true)",
+      "to": ".create(true).truncate(true)",
+      "case": "TC-WINUI-028",
+      "intent": "a pre-existing scratch entry is neither truncated nor acquired",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "streaming_cmd::tests::an_existing_scratch",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "stream-line-limit",
+      "file": "src-tauri/src/streaming_cmd.rs",
+      "from": "if line.len() > MAX_LINE_BYTES {",
+      "to": "if false {",
+      "case": "TC-WINUI-011",
+      "intent": "an oversized line fails with a bounded explicit outcome",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "streaming_cmd::tests::oversized_lines",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "stream-stalled-consumer",
+      "file": "src-tauri/src/streaming_cmd.rs",
+      "from": ".try_send(String::from_utf8_lossy(&line).trim_end().to_string())\n                        .is_err()",
+      "to": ".try_send(String::from_utf8_lossy(&line).trim_end().to_string()).is_ok()",
+      "case": "TC-WINUI-011",
+      "intent": "a stalled consumer cannot become successful output delivery",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "streaming_cmd::tests::oversized_lines",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "windows-text-command-family",
+      "file": "src-tauri/src/commands/shell_sandbox.rs",
+      "from": "if !windows || classified.safety == CommandSafety::Banned {",
+      "to": "if true {",
+      "case": "TC-WINUI-016",
+      "intent": "native assistance cannot acquire unsupported legacy host commands",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "commands::shell_sandbox::tests::native_assistance",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "native-api-exact-origin",
+      "file": "src/lib/api/client.ts",
+      "from": "return `http://127.0.0.1:${port}`;",
+      "to": "return API_BASE;",
+      "case": "TC-WINUI-014",
+      "intent": "native requests use only the actual bound application port",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/lib/api/client-origin.test.ts"
+      ]
+    },
+    {
+      "id": "native-api-port-validation",
+      "file": "src/lib/api/client.ts",
+      "from": "if (typeof port !== \"number\" || !Number.isInteger(port) || port < 11420 || port > 11429) {",
+      "to": "if (false) {",
+      "case": "TC-WINUI-014",
+      "intent": "invalid native discovery cannot select a sibling or arbitrary service",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/lib/api/client-origin.test.ts"
+      ]
+    },
+    {
+      "id": "late-terminal-acquisition-closed",
+      "file": "src/pages/TerminalInstance.svelte",
+      "from": "if (!mounted) {\n          await handle.close();\n          return;\n        }",
+      "to": "if (false) { await handle.close(); return; }",
+      "case": "TC-WINUI-013",
+      "intent": "closing a tab closes a subsequently acquired terminal before enabling input",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/pages/TerminalInstance.test.ts"
+      ]
+    },
+    {
+      "id": "snapshot-generation-fenced",
+      "file": "src/lib/dataPoller.ts",
+      "from": "if (!active?.ready || active.generation == null || data.origin_generation !== active.generation) return;",
+      "to": "if (false) return;",
+      "case": "TC-WINUI-035",
+      "intent": "old snapshot events cannot repopulate original-engine resources",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/lib/dataPoller.test.ts"
+      ]
+    },
+    {
+      "id": "late-resource-generation-fenced",
+      "file": "src/lib/dataPoller.ts",
+      "from": "generation === active.generation",
+      "to": "true",
+      "case": "TC-WINUI-035",
+      "intent": "a completed old read cannot publish after original-engine recheck",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/lib/dataPoller.test.ts"
+      ]
+    },
+    {
+      "id": "ai-context-current-host-tools",
+      "file": "src/lib/agentCore.ts",
+      "from": "const context = isDockerOnlyHost() ?",
+      "to": "const context = false ?",
+      "case": "TC-WINUI-015",
+      "intent": "the actual outgoing model context advertises only the current host tools",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/lib/agentCore.test.ts"
+      ]
+    },
+    {
+      "id": "ai-host-dispatch-authority",
+      "file": "src/lib/aiEventBus.ts",
+      "from": "if (!availableEvent(eventName)) throw new Error",
+      "to": "if (false) throw new Error",
+      "case": "TC-WINUI-016",
+      "intent": "direct dispatch refuses unsupported host tools despite registry presence",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/lib/aiEventBus.test.ts"
+      ]
+    },
+    {
+      "id": "ai-host-advertisement",
+      "file": "src/lib/aiEventBus.ts",
+      "from": ".filter(([name]) => availableEvent(name))",
+      "to": ".filter(() => true)",
+      "case": "TC-WINUI-015",
+      "intent": "unsupported host tools are absent from model advertisement",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/lib/aiEventBus.test.ts"
+      ]
+    },
+    {
+      "id": "prepare-own-checkout",
+      "file": "scripts/setup-hooks.mjs",
+      "from": "{ cwd: root, stdio: 'inherit' }",
+      "to": "{ cwd: process.cwd(), stdio: 'inherit' }",
+      "case": "TC-WINUI-020",
+      "intent": "prepare never changes the launching sibling checkout",
+      "command": "node",
+      "args": [
+        "--test",
+        "scripts/windows-toolchain.node-test.mjs"
+      ]
+    },
+    {
+      "id": "prepare-broken-metadata-refused",
+      "file": "scripts/setup-hooks.mjs",
+      "from": "} else if (probe.error || probe.status !== 0) {",
+      "to": "} else if (false) {",
+      "case": "TC-WINUI-020",
+      "intent": "broken checkout metadata fails rather than pretending hook setup succeeded",
+      "command": "node",
+      "args": [
+        "--test",
+        "scripts/windows-toolchain.node-test.mjs"
+      ]
+    },
+    {
+      "id": "evidence-source-binding",
+      "file": "scripts/windows-evidence.mjs",
+      "from": "build.source?.hash !== currentSource",
+      "to": "false",
+      "case": "TC-WINUI-023",
+      "intent": "a different build source cannot qualify this bundle",
+      "command": "node",
+      "args": [
+        "--test",
+        "scripts/windows-evidence.node-test.mjs"
+      ]
+    },
+    {
+      "id": "evidence-trusted-signature",
+      "file": "scripts/windows-evidence.mjs",
+      "from": "signature.status !== 'Valid'",
+      "to": "false",
+      "case": "TC-WINUI-023",
+      "intent": "untrusted signature metadata is refused before native acceptance",
+      "command": "node",
+      "args": [
+        "--test",
+        "scripts/windows-evidence.node-test.mjs"
+      ]
+    },
+    {
+      "id": "evidence-provider-distinct",
+      "file": "scripts/windows-evidence.mjs",
+      "from": "if (identities.has(fingerprint))",
+      "to": "if (false)",
+      "case": "TC-WINUI-004",
+      "intent": "one relabelled daemon cannot prove two providers",
+      "command": "node",
+      "args": [
+        "--test",
+        "scripts/windows-evidence.node-test.mjs"
+      ]
+    },
+    {
+      "id": "evidence-account-run-pair",
+      "file": "scripts/windows-evidence.mjs",
+      "from": "owner.runId !== outsider.runId",
+      "to": "false",
+      "case": "TC-WINUI-014",
+      "intent": "separately arranged account runs cannot be paired into a structural pass",
+      "command": "node",
+      "args": [
+        "--test",
+        "scripts/windows-evidence.node-test.mjs"
+      ]
+    },
+    {
+      "id": "evidence-account-run-shape",
+      "file": "scripts/windows-evidence.mjs",
+      "from": "!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(owner.runId ?? '')",
+      "to": "false",
+      "case": "TC-WINUI-014",
+      "intent": "matching missing or malformed account run identifiers are refused",
+      "command": "node",
+      "args": [
+        "--test",
+        "scripts/windows-evidence.node-test.mjs"
+      ]
+    },
+    {
+      "id": "evidence-applicable-context-gate",
+      "file": "scripts/windows-evidence.mjs",
+      "from": "n <= 21 || n === 24",
+      "to": "n <= 21",
+      "case": "TC-WINUI-022",
+      "intent": "applicable generated-context parity cannot be waived as not applicable",
+      "command": "node",
+      "args": [
+        "--test",
+        "scripts/windows-evidence.node-test.mjs"
+      ]
+    },
+    {
+      "id": "prerequisite-installed-presence",
+      "file": "src-tauri/src/commands/system.rs",
+      "from": "docker_installed: docker_version.is_some(),",
+      "to": "docker_installed: docker_version.is_none(),",
+      "case": "TC-WINUI-002",
+      "intent": "missing CLI and usable CLI remain distinct regardless of engine state",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "commands::system::prerequisite_tests::prerequisite_metadata_preserves",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "prerequisite-version-only-argv",
+      "file": "src-tauri/src/commands/system.rs",
+      "from": "let docker_version = version(\"docker\", &[\"--version\"]);",
+      "to": "let docker_version = version(\"docker\", &[\"info\"]);",
+      "case": "TC-WINUI-002",
+      "intent": "readiness metadata probes CLI version without acquiring engine work",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib",
+        "commands::system::prerequisite_tests::prerequisite_metadata_preserves",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "assistant-failed-container-is-unknown",
+      "file": "src/lib/agentCore.ts",
+      "from": ": failedRead(\"Container\"))}",
+      "to": ": [])}",
+      "case": "TC-WINUI-016",
+      "intent": "failed supported container reads must not report a healthy empty engine",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/lib/agentCore.test.ts"
+      ]
+    },
+    {
+      "id": "assistant-failed-compose-is-unknown",
+      "file": "src/lib/agentCore.ts",
+      "from": "composeProjects.value : failedRead(\"Compose\")",
+      "to": "composeProjects.value : []",
+      "case": "TC-WINUI-016",
+      "intent": "failed Compose reads stay distinct from successful empty projects",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/lib/agentCore.test.ts"
+      ]
+    },
+    {
+      "id": "recovery-engine-id-scope",
+      "file": "src/App.svelte",
+      "from": "key: JSON.stringify([uiState.currentPage, active.context, active.endpoint, active.engine_id]),",
+      "to": "key: JSON.stringify([uiState.currentPage, active.context, active.endpoint]),",
+      "case": "TC-WINUI-018",
+      "intent": "unsent resource drafts cannot follow a changed active origin",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "recovery-context-scope",
+      "file": "src/App.svelte",
+      "from": "key: JSON.stringify([uiState.currentPage, active.context, active.endpoint, active.engine_id]),",
+      "to": "key: JSON.stringify([uiState.currentPage, active.endpoint, active.engine_id]),",
+      "case": "TC-WINUI-018",
+      "intent": "unsent resource drafts cannot follow a changed active origin",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "recovery-endpoint-scope",
+      "file": "src/App.svelte",
+      "from": "key: JSON.stringify([uiState.currentPage, active.context, active.endpoint, active.engine_id]),",
+      "to": "key: JSON.stringify([uiState.currentPage, active.context, active.engine_id]),",
+      "case": "TC-WINUI-018",
+      "intent": "unsent resource drafts cannot follow a changed active origin",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "recovery-capture-on-failure",
+      "file": "src/lib/recoveryDrafts.svelte.ts",
+      "from": "values.set(name, $state.snapshot(read()));",
+      "to": "values.delete(name);",
+      "case": "TC-WINUI-018",
+      "intent": "recoverable loss/revision replacement retains unsent values while ordinary pages unmount",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "recovery-restores-typed-fields",
+      "file": "src/lib/recoveryDrafts.svelte.ts",
+      "from": "if (saved !== undefined) restore(saved as T);",
+      "to": "if (saved !== undefined && name === \"never-registered\") restore(saved as T);",
+      "case": "TC-WINUI-018",
+      "intent": "valid same-origin remount restores exact typed fields without replay",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "recovery-draft-consumed-once",
+      "file": "src/lib/recoveryDrafts.svelte.ts",
+      "from": "values.delete(name);",
+      "to": "values.get(name);",
+      "case": "TC-WINUI-018",
+      "intent": "a restored transfer draft is not reused after explicit dismissal and a fresh dialog",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "recovery-transfer-target-identity",
+      "file": "src/components/transfer/TransferDialog.svelte",
+      "from": "draft.containerId !== containerId || ",
+      "to": "",
+      "case": "TC-WINUI-018",
+      "intent": "an orphaned transfer draft cannot apply paths to a different target",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "pull-completion-matches-edit-revision",
+      "file": "src/pages/Images.svelte",
+      "from": "fromForm && pullRevision === submittedRevision && pullName === submittedDraft",
+      "to": "fromForm && pullName === submittedDraft",
+      "case": "TC-WINUI-006",
+      "intent": "old image-pull completion cannot erase a newer edit even when text returns to the original value",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "pull-automation-cannot-clear-form",
+      "file": "src/pages/Images.svelte",
+      "from": "fromForm && pullRevision === submittedRevision && pullName === submittedDraft",
+      "to": "pullRevision === submittedRevision && pullName === submittedDraft",
+      "case": "TC-WINUI-006",
+      "intent": "automation results never settle or clear the operator form",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "pull-form-consumes-expected-rejection",
+      "file": "src/pages/Images.svelte",
+      "from": "if (!fromForm) throw e;",
+      "to": "throw e;",
+      "case": "TC-WINUI-006",
+      "intent": "expected pull rejection keeps the real App form visible instead of triggering its global error boundary",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "pull-pending-keyboard-refusal",
+      "file": "src/pages/Images.svelte",
+      "from": "if (!name || (fromForm && pulling)) return;",
+      "to": "if (!name) return;",
+      "case": "TC-WINUI-006",
+      "intent": "Enter cannot submit a second UI pull while the first is pending",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "assistant-unknown-host-failed-read",
+      "file": "src/lib/agentCore.ts",
+      "from": "capabilitiesState.platform === null || isDockerOnlyHost()",
+      "to": "isDockerOnlyHost()",
+      "case": "TC-WINUI-016",
+      "intent": "unknown host rejects remain unavailable, never healthy empty",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/lib/agentCore.test.ts"
+      ]
+    },
+    {
+      "id": "containers-checked-intent",
+      "file": "src/pages/Containers.svelte",
+      "from": "    selected = new Set(draft.selected.filter((id) => dockerState.containers.some((c) => c.Id === id)));",
+      "to": "    selected = new Set();",
+      "case": "TC-WINUI-018",
+      "intent": "same-origin checked rows survive recovery",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "containers-checked-membership",
+      "file": "src/pages/Containers.svelte",
+      "from": "c.Id === id",
+      "to": "true",
+      "case": "TC-WINUI-018",
+      "intent": "removed identities cannot regain checked-row authority",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "images-checked-intent",
+      "file": "src/pages/Images.svelte",
+      "from": "    selected = new Set(draft.selected.filter((id) => dockerState.images.some((image) => image.Id === id)));",
+      "to": "    selected = new Set();",
+      "case": "TC-WINUI-018",
+      "intent": "same-origin checked rows survive recovery",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "images-checked-membership",
+      "file": "src/pages/Images.svelte",
+      "from": "image.Id === id",
+      "to": "true",
+      "case": "TC-WINUI-018",
+      "intent": "removed identities cannot regain checked-row authority",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "networks-checked-intent",
+      "file": "src/pages/Networks.svelte",
+      "from": "    selected = new Set(draft.selected.filter((id) => resourceState.networks.some((n) => n.Id === id)));",
+      "to": "    selected = new Set();",
+      "case": "TC-WINUI-018",
+      "intent": "same-origin checked rows survive recovery",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "networks-checked-membership",
+      "file": "src/pages/Networks.svelte",
+      "from": "n.Id === id",
+      "to": "true",
+      "case": "TC-WINUI-018",
+      "intent": "removed identities cannot regain checked-row authority",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "volumes-checked-intent",
+      "file": "src/pages/Volumes.svelte",
+      "from": "    selected = new Set(draft.selected.filter((name) => resourceState.volumes.some((v) => v.Name === name)));",
+      "to": "    selected = new Set();",
+      "case": "TC-WINUI-018",
+      "intent": "same-origin checked rows survive recovery",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "volumes-checked-membership",
+      "file": "src/pages/Volumes.svelte",
+      "from": "v.Name === name",
+      "to": "true",
+      "case": "TC-WINUI-018",
+      "intent": "removed identities cannot regain checked-row authority",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "topology-search-intent",
+      "file": "src/pages/Topology.svelte",
+      "from": "searchTerm = draft.searchTerm;",
+      "to": "searchTerm = \"\";",
+      "case": "TC-WINUI-018",
+      "intent": "same-origin graph search survives recovery",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "topology-kind-intent",
+      "file": "src/pages/Topology.svelte",
+      "from": "enabledKinds = new Set(draft.kinds);",
+      "to": "enabledKinds = new Set(KINDS);",
+      "case": "TC-WINUI-018",
+      "intent": "graph kind choices survive recovery",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "topology-selected-intent",
+      "file": "src/pages/Topology.svelte",
+      "from": "selectedId = graph.nodes.some((n) => n.id === recoverySelection) ? recoverySelection : null;",
+      "to": "selectedId = null;",
+      "case": "TC-WINUI-018",
+      "intent": "current node selection is re-established from the fresh graph",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "activity-neutral-intent",
+      "file": "src/pages/Activity.svelte",
+      "from": "({ searchTerm, sortKey, sortAsc, tab, historyKind } = draft);",
+      "to": "({ searchTerm } = draft);",
+      "case": "TC-WINUI-018",
+      "intent": "Activity sort, tab and nested filter survive recovery",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "activity-fresh-selection",
+      "file": "src/pages/Activity.svelte",
+      "from": "rows.find((r) => r.containerId === recoverySelection)",
+      "to": "rows.find(() => false)",
+      "case": "TC-WINUI-018",
+      "intent": "selected container detail resumes only with a fresh metric sample",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "activity-nested-kind",
+      "file": "src/pages/Activity.svelte",
+      "from": "<ActionFeed bind:kind={historyKind} />",
+      "to": "<ActionFeed />",
+      "case": "TC-WINUI-018",
+      "intent": "history filter remains owned by the recovering page",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "compose-project-intent",
+      "file": "src/pages/Compose.svelte",
+      "from": "projects.find((p) => p.Name === recoveryProject)",
+      "to": "projects.find(() => false)",
+      "case": "TC-WINUI-018",
+      "intent": "project selection resolves against current projects",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "compose-tab-intent",
+      "file": "src/pages/Compose.svelte",
+      "from": "openProject(target, detailTab)",
+      "to": "openProject(target)",
+      "case": "TC-WINUI-018",
+      "intent": "selected diagnosis tab survives without running diagnosis",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "security-severity-intent",
+      "file": "src/pages/Security.svelte",
+      "from": "findings={currentAudit.scan.findings} bind:minSeverity",
+      "to": "findings={currentAudit.scan.findings}",
+      "case": "TC-WINUI-018",
+      "intent": "neutral finding severity survives without retaining old scan output",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "security-checklist-intent",
+      "file": "src/pages/Security.svelte",
+      "from": "                bind:showPassed\n",
+      "to": "",
+      "case": "TC-WINUI-018",
+      "intent": "neutral passed-rule disclosure survives recovery",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "security-current-image-identity",
+      "file": "src/pages/Security.svelte",
+      "from": "i.Id === recoveryImage?.id && ",
+      "to": "",
+      "case": "TC-WINUI-018",
+      "intent": "reused image reference cannot restore another content identity or its preferences",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "containers-shared-publication",
+      "file": "src/pages/Containers.svelte",
+      "from": "if (isDockerOnlyHost()) return refetchAllResources();",
+      "to": "if (false) return refetchAllResources();",
+      "case": "TC-WINUI-035",
+      "intent": "page refresh cannot bypass current-generation publication",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "images-shared-publication",
+      "file": "src/pages/Images.svelte",
+      "from": "if (isDockerOnlyHost()) return refetchAllResources();",
+      "to": "if (false) return refetchAllResources();",
+      "case": "TC-WINUI-035",
+      "intent": "page refresh cannot bypass current-generation publication",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "networks-shared-publication",
+      "file": "src/pages/Networks.svelte",
+      "from": "if (isDockerOnlyHost()) return refetchAllResources();",
+      "to": "if (false) return refetchAllResources();",
+      "case": "TC-WINUI-035",
+      "intent": "page refresh cannot bypass current-generation publication",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "volumes-shared-publication",
+      "file": "src/pages/Volumes.svelte",
+      "from": "if (isDockerOnlyHost()) return refetchAllResources();",
+      "to": "if (false) return refetchAllResources();",
+      "case": "TC-WINUI-035",
+      "intent": "page refresh cannot bypass current-generation publication",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "terminal-shared-publication",
+      "file": "src/pages/Terminal.svelte",
+      "from": "if (isDockerOnlyHost()) await refetchAllResources();",
+      "to": "if (false) await refetchAllResources();",
+      "case": "TC-WINUI-035",
+      "intent": "retained picker cannot republish a pre-loss resource read",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "rejected-read-generation-fence",
+      "file": "src/lib/dataPoller.ts",
+      "from": "} catch {\n      if (!canPublishResources(run, revision, expectedGeneration)) return;",
+      "to": "} catch {",
+      "case": "TC-WINUI-035",
+      "intent": "late rejection cannot erase a current generation or invent current failure",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/lib/dataPoller.test.ts"
+      ]
+    },
+    {
+      "id": "terminal-unknown-host-acquisition",
+      "file": "src/pages/Terminal.svelte",
+      "from": "dockerLoading || !capabilitiesState.platform",
+      "to": "dockerLoading",
+      "case": "TC-WINUI-002",
+      "intent": "unknown host must not enter the POSIX shared-store writer",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "terminal-target-error-attribution",
+      "file": "src/pages/Terminal.svelte",
+      "from": "? dockerError || dockerState.error ||",
+      "to": "? dockerState.error ||",
+      "case": "TC-WINUI-013",
+      "intent": "ready engine status must not hide a failed terminal target preflight",
+      "command": "node",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App-recovery.test.ts"
+      ]
+    }
+  ]
+}

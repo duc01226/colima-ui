@@ -1,0 +1,139 @@
+{
+  "purpose": "Scoped Windows foundation gate. Existing unrelated dependency debt requires exact reviewed exceptions; no automatic acceptance. Formatting covers the Windows implementation-owned Rust files, including boundary harnesses.",
+  "rustFormatPaths": [
+    "src-tauri/src/adapters/colima.rs",
+    "src-tauri/src/adapters/compose.rs",
+    "src-tauri/src/adapters/docker.rs",
+    "src-tauri/src/adapters/kubectl.rs",
+    "src-tauri/src/adapters/lima.rs",
+    "src-tauri/src/adapters/nerdctl.rs",
+    "src-tauri/src/api_reference.rs",
+    "src-tauri/src/api_server.rs",
+    "src-tauri/src/app_settings.rs",
+    "src-tauri/src/bin/cui.rs",
+    "src-tauri/src/child_process.rs",
+    "src-tauri/src/commands/activity.rs",
+    "src-tauri/src/commands/autostart.rs",
+    "src-tauri/src/commands/colima.rs",
+    "src-tauri/src/commands/colima_config.rs",
+    "src-tauri/src/commands/compose.rs",
+    "src-tauri/src/commands/compose_diagnose.rs",
+    "src-tauri/src/commands/compose_services.rs",
+    "src-tauri/src/commands/containers.rs",
+    "src-tauri/src/commands/diagnostics.rs",
+    "src-tauri/src/commands/engine_connection.rs",
+    "src-tauri/src/commands/engine_resources.rs",
+    "src-tauri/src/commands/file_transfer.rs",
+    "src-tauri/src/commands/k8s_cluster.rs",
+    "src-tauri/src/commands/k8s_resources.rs",
+    "src-tauri/src/commands/kind.rs",
+    "src-tauri/src/commands/knowledge_bank.rs",
+    "src-tauri/src/commands/kubernetes.rs",
+    "src-tauri/src/commands/lima.rs",
+    "src-tauri/src/commands/metrics_collector.rs",
+    "src-tauri/src/commands/mod.rs",
+    "src-tauri/src/commands/models.rs",
+    "src-tauri/src/commands/runtime.rs",
+    "src-tauri/src/commands/security_rules.rs",
+    "src-tauri/src/commands/security_scan.rs",
+    "src-tauri/src/commands/self_heal.rs",
+    "src-tauri/src/commands/shell_sandbox.rs",
+    "src-tauri/src/commands/system.rs",
+    "src-tauri/src/commands/system_capabilities.rs",
+    "src-tauri/src/commands/terminal.rs",
+    "src-tauri/src/crash.rs",
+    "src-tauri/src/docker_events.rs",
+    "src-tauri/src/docker_state.rs",
+    "src-tauri/src/engine_connection.rs",
+    "src-tauri/src/helpers.rs",
+    "src-tauri/src/host_features.rs",
+    "src-tauri/src/instance_reader.rs",
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/path_util.rs",
+    "src-tauri/src/platform.rs",
+    "src-tauri/src/poller.rs",
+    "src-tauri/src/private_file.rs",
+    "src-tauri/src/routes/capabilities.rs",
+    "src-tauri/src/routes/file_transfer.rs",
+    "src-tauri/src/routes/images.rs",
+    "src-tauri/src/routes/kb.rs",
+    "src-tauri/src/routes/system.rs",
+    "src-tauri/src/sse.rs",
+    "src-tauri/src/streaming_cmd.rs",
+    "src-tauri/src/terminal_session.rs",
+    "src-tauri/src/transfer_registry.rs",
+    "src-tauri/src/tray.rs",
+    "src-tauri/src/validation.rs",
+    "src-tauri/src/windows_host.rs",
+    "src-tauri/src/windows_pty.rs",
+    "src-tauri/tests/metrics_collector_cost.rs",
+    "src-tauri/tests/native/windows_metrics_cost.rs",
+    "src-tauri/tests/native/windows_provider_contract.rs",
+    "src-tauri/tests/support/docker_fixture.rs",
+    "src-tauri/tests/support/metrics_budget.rs"
+  ],
+  "secretFingerprints": [
+    "30036005d253650906eb86cba79e1955573cc6b0c4f9f4f15d9351897b10665a",
+    "32f2ed1926e507ce8878d3740bb02c30e9b90c9e192b57d46e81b5b31ce36297",
+    "43ab08bca0b7763e45fe0d2143c96c54f23624ce71e7270b1d54e19e7c69c956",
+    "794d162b80867e6bced44bb2b70be7dc14608cdf103c74ae4d179fb533cec5d5",
+    "85557cddcb4117a33226fd0c6cce10b38b0e097a306022625af79e7516184b54",
+    "b788c6246b336b942b0857a4ad93831a74ea3730a1bacc1afd082c1b43794489"
+  ],
+  "dependencyExceptions": [
+    {
+      "key": "cargo:unsound:glib@0.18.5:RUSTSEC-2024-0429",
+      "reason": "Pre-existing full HEAD lock record and unchanged Tauri/GTK0.18 Linux graph; absent from x86_64-pc-windows-msvc graph. No direct VariantStrIter use or new GLib API use. Patched>=0.20 requires an upstream GTK/Tauri dependency upgrade outside this Windows slice. Soundness risk remains open for the inherited Linux stack; remove this exact record when upstream upgrades.",
+      "owner": "ColimaUI maintainers",
+      "reviewedAt": "2026-10-15"
+    },
+    {
+      "key": "cargo:unmaintained:proc-macro-error@1.0.4:RUSTSEC-2024-0370",
+      "reason": "Pre-existing unchanged full HEAD lock record through glib-macros0.18/gtk3-macros0.18 build-time dependencies; no Windows feature enables a new use of this macro crate. No patched version. Follow the upstream GTK/Tauri stack migration, then remove this exact maintenance-debt record.",
+      "owner": "ColimaUI maintainers",
+      "reviewedAt": "2026-10-15"
+    },
+    {
+      "key": "cargo:unmaintained:unic-char-property@0.9.0:RUSTSEC-2025-0081",
+      "reason": "Pre-existing unchanged HEAD package record in the existing urlpattern0.3/tauri-plugin-http2.5.9 dependency family; no new URL-pattern API, network authority or plugin feature introduced. No patched version. Track the upstream Unicode implementation replacement and remove this exact record.",
+      "owner": "ColimaUI maintainers",
+      "reviewedAt": "2026-10-15"
+    },
+    {
+      "key": "cargo:unmaintained:unic-char-range@0.9.0:RUSTSEC-2025-0075",
+      "reason": "Pre-existing unchanged HEAD package record in the existing urlpattern0.3/tauri-plugin-http2.5.9 Unicode family; no new URL-pattern API or plugin feature. No patched version. Remove after the upstream Unicode-range implementation is replaced.",
+      "owner": "ColimaUI maintainers",
+      "reviewedAt": "2026-10-15"
+    },
+    {
+      "key": "cargo:unmaintained:unic-common@0.9.0:RUSTSEC-2025-0080",
+      "reason": "Pre-existing unchanged HEAD package record in the existing urlpattern0.3/tauri-plugin-http2.5.9 Unicode family; no new URL-pattern API or plugin feature. No patched version. Remove after the upstream Unicode implementation is replaced.",
+      "owner": "ColimaUI maintainers",
+      "reviewedAt": "2026-10-15"
+    },
+    {
+      "key": "cargo:unmaintained:unic-ucd-ident@0.9.0:RUSTSEC-2025-0100",
+      "reason": "Pre-existing unchanged HEAD package record directly under urlpattern0.3 in tauri-plugin-http2.5.9, used before this Windows slice with the same features. No patched version. Remove after the upstream identifier-property implementation is replaced.",
+      "owner": "ColimaUI maintainers",
+      "reviewedAt": "2026-10-15"
+    },
+    {
+      "key": "cargo:unmaintained:unic-ucd-version@0.9.0:RUSTSEC-2025-0098",
+      "reason": "Pre-existing unchanged HEAD package record in the existing urlpattern0.3/tauri-plugin-http2.5.9 Unicode family; no new URL-pattern API or plugin feature. No patched version. Remove after the upstream Unicode implementation is replaced.",
+      "owner": "ColimaUI maintainers",
+      "reviewedAt": "2026-10-15"
+    },
+    {
+      "key": "license:cargo:html2md@0.2.17:GPL-3.0+",
+      "reason": "Pre-existing unchanged full HEAD lock record and existing SearXNG HTML conversion path; no new dependency or conversion API use in the Windows slice. This exact entry implements the approved P5 F7 unrelated-legacy ratchet only. Distribution-license decision, obligations/notices and any permissive converter replacement remain a maintainer release prerequisite; this is not licensing approval.",
+      "owner": "ColimaUI maintainers",
+      "reviewedAt": "2026-10-15"
+    },
+    {
+      "key": "license:npm:elkjs@0.12.0:EPL-2.0 OR GPL-3.0-or-later",
+      "reason": "Pre-existing byte-identical HEAD package record and graph-layout use. Installed LICENSE.md is EPL2; package metadata also lists a GPL alternative and the conservative sensor requires review. This exact legacy entry is not distribution clearance: maintainers must establish applicable licensing and shipped notices before publication. No license expression is silently rewritten.",
+      "owner": "ColimaUI maintainers",
+      "reviewedAt": "2026-10-15"
+    }
+  ]
+}

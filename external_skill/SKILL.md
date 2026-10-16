@@ -1,36 +1,25 @@
 ---
 name: colima-ui
-description: Trợ lý AI điều khiển toàn diện hệ thống Container, Kubernetes và máy ảo thông qua ColimaUI. Giao tiếp qua Headless CLI Chat hoặc gọi trực tiếp qua REST API.
+description: Trợ lý điều phối Container, Kubernetes và máy ảo qua ColimaUI theo khả năng của host và quy tắc phê duyệt. Dùng CLI cui hoặc REST API đã xác thực.
 ---
 
 # ColimaUI Orchestration Skill
 
-Bạn là một Orchestrator đang điều khiển **ColimaUI** - một Nền tảng AI thống nhất chuyên quản lý Docker, Kubernetes, và Lima VMs.
+Bạn điều phối tác vụ người dùng đã yêu cầu qua ColimaUI. Kiểm tra khả năng hiện tại trước khi chọn hành động; danh mục không cấp quyền vượt qua sandbox hoặc phê duyệt. Trên Windows, chỉ dùng Docker/Linux containers với engine đã chọn; VM/Kubernetes/cài runtime/model quản lý cục bộ không khả dụng (`src-tauri/src/host_features.rs:16`).
 
 ## Cách thức tương tác
 
-ColimaUI cung cấp 2 chế độ điều khiển:
+1. **AI Chat:** ưu tiên CLI đã cài: `cui "Hãy liệt kê container đang chạy"`. CLI đọc tham chiếu riêng tư của đúng phiên ứng dụng rồi gọi `POST /api/cli/chat`; không chuyển sang phiên khác khi lỗi. Tool vẫn phải tuân thủ Safe/Approve/Banned và yêu cầu phê duyệt hiện hành (`src-tauri/src/bin/cui.rs:97`).
+2. **REST trực tiếp:** dùng client đã được chủ tài khoản cấp quyền, giữ credential trong bộ nhớ và gửi header `Authorization: Bearer <TOKEN>` tới đúng port của phiên. Đọc `references/api_reference.md` và tài liệu API chuẩn; không suy đoán payload từ tên event.
 
-1. **Giao tiếp qua AI Chat (Delegation Mode)**
-   Thay vì tự bạn (Orchestrator) phải phân tích hệ thống, bạn có thể gửi một mệnh lệnh bằng ngôn ngữ tự nhiên (Prompt) cho AI của ColimaUI. AI của ColimaUI sẽ tự động gọi các tool nội bộ của nó để hoàn thành tác vụ và trả về kết quả cho bạn.
-   - Lệnh CLI: `curl -H "Authorization: Bearer <TOKEN>" -X POST http://127.0.0.1:11420/api/cli/chat -d '{"prompt": "Hãy kiểm tra xem có container nào đang bị exit không và xóa chúng."}'`
-   - Use Case: Khi tác vụ phức tạp, cần suy luận nhiều bước về hệ thống, hoặc bạn muốn ủy quyền hoàn toàn cho ColimaUI AI.
+## Xác thực và đúng phiên ứng dụng
 
-2. **Gọi API Trực tiếp (Direct Control Mode)**
-   Nếu bạn đã biết chính xác hành động cần làm, bạn có thể gọi trực tiếp REST API của ColimaUI để thực thi nhanh hơn (không phải chờ LLM của ColimaUI suy luận).
-   - Lệnh CLI: Sử dụng `curl` để gửi GET/POST tới `http://127.0.0.1:11420/api/...` kèm header `Authorization: Bearer <TOKEN>`
-   - Đọc chi tiết danh sách API trong `references/api_reference.md`.
+`GET /api/health` công khai. API nghiệp vụ yêu cầu credential; không có endpoint HTTP lấy token. Ứng dụng lưu marker không bí mật `internal.api_instance` trong `app_settings` của `knowledge.db`, còn port/token nằm trong file owner-private `api/<instance>.json`. Dùng chủ đọc chung `api_reference`/CLI; không sửa marker hoặc duyệt file cũ để chọn phiên (`src-tauri/src/api_reference.rs:12`, `src-tauri/src/api_reference.rs:68`).
 
-## Xác thực (Authentication)
-Tất cả các API calls đều yêu cầu xác thực bằng Bearer token.
-- Lấy token: Đọc nội dung file `~/.colimaui/api_token` hoặc gọi `GET /api/auth/token` (nếu không bật auth middleware).
-- Gửi token: Thêm header `Authorization: Bearer <TOKEN>` vào mọi request.
+Data root là KnownFolder LocalAppData/`ColimaUI` trên Windows; macOS/Linux dùng `HOME/.colima-ui` (fallback `/tmp/.colima-ui`). Quyền riêng tư được thiết lập trước khi ghi và kiểm tra trên handle đọc. Nếu tham chiếu thiếu, sai, stale hoặc không kết nối được, dừng và yêu cầu mở lại ứng dụng; không dò các health port để lấy phiên khác (`src-tauri/src/path_util.rs:76`, `src-tauri/src/private_file.rs:20`).
 
-## Tính năng tự nhận thức (Meta-Capabilities)
+Không in, sao chép vào prompt, log, shell transcript hay evidence bất kỳ token/file JSON riêng tư nào. Không dùng query token cho API thường; ngoại lệ EventSource được backend liệt kê riêng (`src-tauri/src/auth.rs:49`).
 
-ColimaUI có khả năng tự thay đổi bộ não AI của chính nó (Ví dụ: Chuyển từ OpenAI sang Ollama). 
-Bạn có thể ra lệnh cho ColimaUI cấu hình lại AI:
-- Bằng cách gọi API: `POST /api/settings`
-- Hoặc thông qua AI Chat: `curl -H "Authorization: Bearer <TOKEN>" -X POST http://127.0.0.1:11420/api/cli/chat -d '{"prompt": "Hãy chuyển sang dùng model claude-3-haiku-20240307 của anthropic."}'`
+## Cấu hình và giới hạn
 
-Hãy đọc thêm về danh sách khả năng của ColimaUI tại `references/capabilities.md`.
+Đọc `references/capabilities.md` trước khi chọn event/cấu hình. `POST /api/settings` không cấp quyền thực thi hay chuyển engine đang hoạt động; lựa chọn engine lưu cho lần mở sau. Không hứa tác vụ đã thành công nếu chỉ nhận lời chấp nhận, kết quả mô phỏng hoặc dữ liệu thiếu. HTTP command SSE chỉ chạy Safe và trả output hoàn tất có giới hạn; không cấp phê duyệt tương tác (`src-tauri/src/routes/kb.rs:98`).

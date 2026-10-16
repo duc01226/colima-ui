@@ -23,10 +23,17 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: npm
 
       - run: npm ci
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: rustfmt
+
+      - name: Windows foundation boundaries, config, secrets and scoped Rust format
+        run: npm run check:windows
 
       - name: ESLint (dead code / unused / error-prone)
         run: npm run lint
@@ -48,6 +55,9 @@ jobs:
       - name: Unit tests (vitest)
         run: npm test
 
+      - name: Build and version tooling contracts
+        run: npm run test:tooling
+
   # ===== Rust Check (all platforms) =====
   rust-check:
     name: Rust Check (${{ matrix.name }})
@@ -58,19 +68,41 @@ jobs:
           - name: macOS ARM64
             runner: macos-latest
             target: aarch64-apple-darwin
+            native: true
           - name: macOS x86
             runner: macos-latest
             target: x86_64-apple-darwin
+            native: false
           - name: Linux x86
             runner: ubuntu-latest
             target: ""
+            native: true
+          - name: Windows MSVC x64 (hosted build, not Windows 11 qualification)
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            native: true
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Controlled process fixtures share the declared Node prerequisite on
+      # Windows/macOS/Linux; the installed application never depends on Node.
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: ${{ matrix.target }}
+          components: clippy,rustfmt
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+          vsversion: '2022'
+          toolset: '14.44'
+          sdk: '10.0.26100.0'
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -85,29 +117,34 @@ jobs:
 
       - name: cargo check
         working-directory: src-tauri
+        run: cargo check --locked --all-targets --all-features ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+
+      - name: Parse native PowerShell helpers without executing them
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          if [ -n "${{ matrix.target }}" ]; then
-            cargo check --target ${{ matrix.target }}
-          else
-            cargo check
-          fi
+          Get-ChildItem scripts -Filter *.ps1 | ForEach-Object {
+            $parseTokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$parseTokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count -gt 0) { throw "PowerShell syntax failed: $($_.Name)" }
+          }
 
       - name: cargo clippy (dead code / unused — errors on any warning)
         working-directory: src-tauri
-        run: |
-          if [ -n "${{ matrix.target }}" ]; then
-            cargo clippy --all-targets --all-features --target ${{ matrix.target }} -- -D warnings
-          else
-            cargo clippy --all-targets --all-features -- -D warnings
-          fi
+        run: cargo clippy --locked --all-targets --all-features ${{ matrix.target && format('--target {0}', matrix.target) || '' }} -- -D warnings
 
       # Native runner only: a cross-compiled target cannot execute its tests.
       # Integration tests that need Docker/Trivy carry #[ignore], so a bare
       # `cargo test` runs the unit tests and skips them.
       - name: cargo test (unit)
-        if: matrix.target == ''
+        if: matrix.native
         working-directory: src-tauri
-        run: cargo test --lib
+        run: cargo test --locked --lib --all-features
+
+      - name: Standalone CLI build
+        working-directory: src-tauri
+        run: cargo build --locked --features cli --bins ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
 
   # ===== Frontend Build =====
   frontend-build:
@@ -118,7 +155,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: npm
 
       - run: npm ci
@@ -129,3 +166,25 @@ jobs:
           name: frontend-dist
           path: dist/
           retention-days: 1
+
+  dependency-health:
+    name: Scoped dependency and license ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - run: npm ci
+      - name: Install declared audit tool
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - run: npm run check:dependencies
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: dependency-health
+          path: tmp/reports/windows-quality/
+          if-no-files-found: error
+          retention-days: 7

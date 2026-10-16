@@ -12,9 +12,10 @@
 
   interface Props {
     findings: Finding[];
+    minSeverity?: Severity;
   }
 
-  let { findings }: Props = $props();
+  let { findings, minSeverity = $bindable<Severity>("low") }: Props = $props();
 
   const ORDER: Severity[] = ["critical", "high", "medium", "low", "unknown"];
 
@@ -28,8 +29,6 @@
     const at = ORDER.indexOf(sev);
     return at === -1 ? ORDER.length : at;
   }
-
-  let minSeverity = $state<Severity>("low");
 
   const counts = $derived.by(() => {
     const c: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };

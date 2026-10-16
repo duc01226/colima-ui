@@ -33,6 +33,7 @@ fn ensure_optional_namespace(ns: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn k8s_apply(yaml: String, namespace: String) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     async move {
         ensure_optional_namespace(&namespace)?;
         run_blocking(move || {
@@ -83,6 +84,7 @@ pub async fn k8s_yaml(
     namespace: String,
     name: String,
 ) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     async move {
         ensure_name("resource type", &resource_type)?;
         ensure_name("resource name", &name)?;
@@ -113,6 +115,7 @@ pub async fn k8s_delete_resource(
     namespace: String,
     name: String,
 ) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     async move {
         if !K8S_DELETABLE_RESOURCES.contains(&resource_type.as_str()) {
             return Err(format!(
@@ -139,13 +142,17 @@ pub async fn k8s_restart(
     namespace: String,
     name: String,
 ) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     async move {
         ensure_name("resource type", &resource_type)?;
         ensure_name("resource name", &name)?;
         ensure_name("namespace", &namespace)?;
         run_blocking(move || {
             let target = format!("{resource_type}/{name}");
-            run_cmd("kubectl", &["rollout", "restart", &target, "-n", &namespace])
+            run_cmd(
+                "kubectl",
+                &["rollout", "restart", &target, "-n", &namespace],
+            )
         })
         .await
     }
@@ -160,6 +167,7 @@ pub async fn k8s_generic_scale(
     name: String,
     replicas: u32,
 ) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     async move {
         ensure_name("resource type", &resource_type)?;
         ensure_name("resource name", &name)?;
@@ -186,16 +194,15 @@ pub async fn k8s_generic_scale(
 
 #[tauri::command]
 pub async fn k8s_crds() -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     run_blocking(|| run_cmd("kubectl", &["get", "crd", "-o", "json"]))
         .await
         .map_err(ColimaError::from)
 }
 
 #[tauri::command]
-pub async fn k8s_crd_resources(
-    resource: String,
-    namespace: String,
-) -> Result<String, ColimaError> {
+pub async fn k8s_crd_resources(resource: String, namespace: String) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     async move {
         // A CRD plural is `widgets.example.com` — dots are meaningful here, so
         // this uses the same shape check the HTTP route does rather than
@@ -215,7 +222,10 @@ pub async fn k8s_crd_resources(
                     &["get", &resource, "-o", "json", "--all-namespaces"],
                 )
             } else {
-                run_cmd("kubectl", &["get", &resource, "-o", "json", "-n", &namespace])
+                run_cmd(
+                    "kubectl",
+                    &["get", &resource, "-o", "json", "-n", &namespace],
+                )
             }
         })
         .await
@@ -226,6 +236,7 @@ pub async fn k8s_crd_resources(
 
 #[tauri::command]
 pub async fn k8s_pod_containers(namespace: String, pod: String) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     async move {
         ensure_name("namespace", &namespace)?;
         ensure_name("pod name", &pod)?;
@@ -257,6 +268,7 @@ pub async fn k8s_container_logs(
     lines: u32,
     previous: bool,
 ) -> Result<String, ColimaError> {
+    crate::host_features::HostFeature::Kubernetes.require()?;
     async move {
         ensure_name("namespace", &namespace)?;
         ensure_name("pod name", &pod)?;
@@ -265,7 +277,15 @@ pub async fn k8s_container_logs(
         }
         run_blocking(move || {
             let tail = lines.to_string();
-            let mut args = vec!["logs", "-n", &namespace, &pod, "--tail", &tail, "--timestamps"];
+            let mut args = vec![
+                "logs",
+                "-n",
+                &namespace,
+                &pod,
+                "--tail",
+                &tail,
+                "--timestamps",
+            ];
             if !container.is_empty() {
                 args.push("-c");
                 args.push(&container);

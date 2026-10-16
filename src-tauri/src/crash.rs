@@ -62,8 +62,8 @@ pub struct CrashReport {
 }
 
 /// `~/.colima-ui/crashes`.
-fn crash_dir() -> std::path::PathBuf {
-    crate::path_util::app_data_dir().join("crashes")
+fn crash_dir() -> std::io::Result<std::path::PathBuf> {
+    Ok(crate::path_util::try_app_data_dir()?.join("crashes"))
 }
 
 fn unix_now() -> u64 {
@@ -177,7 +177,7 @@ fn latest_report_in(dir: &std::path::Path) -> Option<CrashReport> {
 /// Read by the diagnostic bundle, so the user can see what the app was doing
 /// when it died without having had a terminal open at the time.
 pub fn latest_report() -> Option<CrashReport> {
-    latest_report_in(&crash_dir())
+    latest_report_in(&crash_dir().ok()?)
 }
 
 /// Install the redacting panic hook. Call once, early in startup.
@@ -196,8 +196,17 @@ pub fn install() {
         // that turns into an abort because recording it went wrong.
         let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
             let payload = payload_to_string(info.payload());
-            let location = info.location().map(|l| format!("{}:{}", l.file(), l.line()));
-            handle_panic(&crash_dir(), unix_now(), location.as_deref(), &payload);
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()));
+            if let Ok(dir) = crash_dir() {
+                handle_panic(&dir, unix_now(), location.as_deref(), &payload);
+            } else {
+                eprintln!(
+                    "{}",
+                    redacted_report(location.as_deref(), &truncate_payload(&payload))
+                );
+            }
         }));
     }));
 }
@@ -316,8 +325,16 @@ mod tests {
 
         let kept = sorted_reports(dir.path());
         assert_eq!(kept.len(), KEEP_REPORTS, "kept: {kept:?}");
-        assert_eq!(kept.last().expect("non-empty").0, 1_700_000_011, "newest was dropped");
-        assert_eq!(kept.first().expect("non-empty").0, 1_700_000_002, "oldest was kept");
+        assert_eq!(
+            kept.last().expect("non-empty").0,
+            1_700_000_011,
+            "newest was dropped"
+        );
+        assert_eq!(
+            kept.first().expect("non-empty").0,
+            1_700_000_002,
+            "oldest was kept"
+        );
     }
 
     /// Two crashes in the same second must both survive. A crash loop is when
@@ -380,7 +397,11 @@ mod tests {
 
         let stored = latest_report_in(dir.path()).expect("written").content;
         assert!(stored.len() < 100_000, "stored {} bytes", stored.len());
-        assert!(stored.contains("truncated"), "no truncation marker: {}", &stored[..80]);
+        assert!(
+            stored.contains("truncated"),
+            "no truncation marker: {}",
+            &stored[..80]
+        );
     }
 
     #[test]
@@ -439,11 +460,25 @@ mod tests {
             "called `Option::unwrap()` on a `None` value",
         );
 
-        let stored = latest_report_in(dir.path()).expect("a report was written").content;
-        assert!(stored.contains(env!("CARGO_PKG_VERSION")), "version missing: {stored}");
-        assert!(stored.contains(std::env::consts::OS), "os missing: {stored}");
-        assert!(stored.contains("containers.rs:42"), "location missing: {stored}");
-        assert!(stored.contains("Option::unwrap()"), "message missing: {stored}");
+        let stored = latest_report_in(dir.path())
+            .expect("a report was written")
+            .content;
+        assert!(
+            stored.contains(env!("CARGO_PKG_VERSION")),
+            "version missing: {stored}"
+        );
+        assert!(
+            stored.contains(std::env::consts::OS),
+            "os missing: {stored}"
+        );
+        assert!(
+            stored.contains("containers.rs:42"),
+            "location missing: {stored}"
+        );
+        assert!(
+            stored.contains("Option::unwrap()"),
+            "message missing: {stored}"
+        );
     }
 
     /// A panic message carrying a credential must not reach the file.
@@ -457,8 +492,13 @@ mod tests {
             "POSTGRES_PASSWORD=hunter2 rejected by server",
         );
 
-        let stored = latest_report_in(dir.path()).expect("a report was written").content;
-        assert!(!stored.contains("hunter2"), "password leaked to disk: {stored}");
+        let stored = latest_report_in(dir.path())
+            .expect("a report was written")
+            .content;
+        assert!(
+            !stored.contains("hunter2"),
+            "password leaked to disk: {stored}"
+        );
     }
 
     /// The stored file must already be redacted — there is no second pass.
@@ -471,9 +511,17 @@ mod tests {
         );
         write_report_in(dir.path(), 1_700_000_000, &report);
 
-        let stored = latest_report_in(dir.path()).expect("report was written").content;
-        assert!(!stored.contains("AIzaSyC1234567890abcdefghijklmnop"), "key leaked to disk: {stored}");
-        assert!(stored.contains("ai_chat.rs:180"), "location should survive: {stored}");
+        let stored = latest_report_in(dir.path())
+            .expect("report was written")
+            .content;
+        assert!(
+            !stored.contains("AIzaSyC1234567890abcdefghijklmnop"),
+            "key leaked to disk: {stored}"
+        );
+        assert!(
+            stored.contains("ai_chat.rs:180"),
+            "location should survive: {stored}"
+        );
     }
 
     #[test]
@@ -483,7 +531,10 @@ mod tests {
         let msg = "error sending request for url \
                    (https://generativelanguage.googleapis.com/v1beta/models?key=AIzaSyC1234567890abcdefghijklmnop)";
         let report = redacted_report(Some("src/commands/ai_chat.rs:180"), msg);
-        assert!(!report.contains("AIzaSyC1234567890abcdefghijklmnop"), "key leaked: {report}");
+        assert!(
+            !report.contains("AIzaSyC1234567890abcdefghijklmnop"),
+            "key leaked: {report}"
+        );
         assert!(report.contains("redacted"));
         // Location is kept — it is the useful, non-sensitive part.
         assert!(report.contains("ai_chat.rs:180"));
@@ -493,12 +544,18 @@ mod tests {
     fn report_redacts_bearer_token() {
         let msg = "auth failed: Authorization: Bearer sk-ant-abcdefghijklmnopqrstuvwxyz012345";
         let report = redacted_report(None, msg);
-        assert!(!report.contains("sk-ant-abcdefghijklmnopqrstuvwxyz012345"), "token leaked: {report}");
+        assert!(
+            !report.contains("sk-ant-abcdefghijklmnopqrstuvwxyz012345"),
+            "token leaked: {report}"
+        );
     }
 
     #[test]
     fn report_keeps_a_harmless_message_readable() {
-        let report = redacted_report(Some("src/foo.rs:12"), "index out of bounds: the len is 3 but the index is 5");
+        let report = redacted_report(
+            Some("src/foo.rs:12"),
+            "index out of bounds: the len is 3 but the index is 5",
+        );
         assert!(report.contains("index out of bounds"));
         assert!(report.contains("foo.rs:12"));
     }

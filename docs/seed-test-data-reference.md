@@ -10,13 +10,13 @@ Read this before changing sample data, fixture loading or startup knowledge cont
 | --- | --- | --- |
 | Broken Compose evaluation cases | `scripts/build-compose-corpus.py:21`; its `main()` at line 184 writes `tests/compose-corpus` | Regenerates named case files and manifest; synthetic cases are not proof about real user files. |
 | Dockerfile parser fixtures | `src-tauri/src/commands/dockerfile_parse.rs:182` reads `tests/dockerfile-corpus` | Requires byte-identical parse/render round trips and at least 20 checked files; it does not build images (`src-tauri/src/commands/dockerfile_parse.rs:193`, `src-tauri/src/commands/dockerfile_parse.rs:203`). |
-| Scanner parser fixtures | `src-tauri/src/commands/security_scan.rs:782` reads `tests/fixtures` relative to the Cargo crate working directory (`src-tauri/tests/fixtures` in the repository) | Frozen JSON protects parsing outcomes; a fixture pass is not a live vulnerability scan. |
+| Scanner parser fixtures | `src-tauri/src/commands/security_scan.rs:1039` reads `tests/fixtures` relative to the Cargo crate working directory (`src-tauri/tests/fixtures` in the repository) | Frozen JSON protects parsing outcomes; a fixture pass is not a live vulnerability scan. |
 | Builtin troubleshooting solutions | `src-tauri/src/commands/knowledge_bank.rs:185` calls `seed_builtins` when no builtin solution rows exist | Runtime bootstrap of the user's application store, not a test-only seeder. |
 | Offline Help articles | `src-tauri/src/commands/kb_articles.rs:169` seeds compiled article bodies during knowledge-bank initialization | Upsert by slug/locale and newer article version; same-version rows stay intact. |
 
 ## Runtime data ownership
 
-Application setup initializes the knowledge bank before starting the HTTP API (`src-tauri/src/lib.rs:97`). Its SQLite file is `knowledge.db` under the application data directory (`src-tauri/src/commands/knowledge_bank.rs:19`). The directory comes from nonempty `HOME` or the `/tmp` fallback, followed by `.colima-ui` (`src-tauri/src/path_util.rs:65`). Treat it as user data; there is no test-environment guard on this normal application startup path.
+Application setup resolves and creates the data directory, then initializes the knowledge bank before starting the HTTP API (`src-tauri/src/lib.rs:125`). Its SQLite file is `knowledge.db` under the shared app/CLI data root (`src-tauri/src/commands/knowledge_bank.rs:19`). Windows uses the current account’s native LocalAppData Known Folder plus `ColimaUI`; macOS/Linux retain nonempty `HOME` or `/tmp`, followed by `.colima-ui`. Windows resolution failure does not write relative to the launch directory (`src-tauri/src/path_util.rs:76`, `src-tauri/src/windows_host.rs:15`, `src-tauri/src/windows_host.rs:38`). Treat it as user data; there is no test-environment guard on this normal application startup path.
 
 Builtin solutions use a whole-set empty check. `seed_builtins` issues ordinary inserts and ignores individual insert errors, so this mechanism does not promise row-by-row reconciliation of a partial set or a seed transaction (`src-tauri/src/commands/knowledge_bank.rs:185`, `src-tauri/src/commands/knowledge_bank.rs:416`).
 
@@ -33,3 +33,7 @@ The Compose benchmark reads input YAML through Docker's validator and writes a C
 The scanner bakeoff uses existing local Docker images and can download/update scanner databases. Its output directory is caller-selected; use a disposable workspace directory for a new run. It is an environment-dependent benchmark, not a hermetic fixture generator (`scripts/security-scanner-bakeoff.py:20`, `scripts/security-scanner-bakeoff.py:52`, `scripts/security-scanner-bakeoff.py:111`).
 
 This reference was derived from source. No loaders or benchmarks ran, no user database was read, and no runtime test result or accepted baseline is claimed. Read `docs/integration-test-reference.md` when changing boundary-test setup.
+
+## Dedicated Windows fixtures
+
+The provider Dockerfile requires an explicitly prepared, already-local immutable base and declares the fixture label/tools; the runner never pulls or implicitly builds it. The shared fixture validates the selected dedicated daemon, rejects pre-existing containers/volumes/custom networks, uses unique run-owned names and cleans only those resources (`src-tauri/tests/fixtures/provider/Dockerfile:3`, `src-tauri/tests/support/docker_fixture.rs:40`, `src-tauri/tests/support/docker_fixture.rs:159`). Keep this separate from user/runtime data and legacy Unix fixtures. `tests/fixtures/process.mjs` is a portable subprocess fixture, not a live Docker provider (`tests/fixtures/process.mjs:7`). Read `docs/windows-qualification.md` before arranging native accounts, images or controlled updater source copies.

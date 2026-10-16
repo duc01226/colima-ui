@@ -16,7 +16,7 @@
   } from "../lib/api/metrics";
   import { MetricsHistory, type SortKey } from "../lib/metricsHistory";
   import { getAppSetting, setAppSetting } from "../lib/settingsStore.svelte";
-  import { systemApi, type EngineResources } from "../lib/api";
+  import { systemApi, type EngineResources, type ActivityKind } from "../lib/api";
   import { globalToast } from "../lib/globalToast";
   import { t } from "../lib/i18n.svelte";
   import * as Icons from "../components/Icons.svelte";
@@ -24,6 +24,7 @@
   import ActionFeed from "../components/activity/ActionFeed.svelte";
   import HealSuggestionBanner from "../components/activity/HealSuggestionBanner.svelte";
   import { openSettingsSection } from "../store.svelte";
+  import { recoveryDraft } from "../lib/recoveryDrafts.svelte";
 
   const INTERVAL_SETTING = "colimaui_metrics_interval_ms";
   const INTERVALS = [1000, 2000, 5000];
@@ -47,6 +48,14 @@
   let processesLoading = $state(false);
 
   let intervalMs = $state(Number(getAppSetting(INTERVAL_SETTING)) || 2000);
+  type Tab = "live" | "actions";
+  let tab = $state<Tab>("live");
+  let historyKind = $state<ActivityKind | "">("");
+  let recoverySelection: string | null = null;
+  recoveryDraft("activity-intent", () => ({ searchTerm, sortKey, sortAsc, tab, historyKind, selectedId: selected?.containerId ?? recoverySelection }), (draft) => {
+    ({ searchTerm, sortKey, sortAsc, tab, historyKind } = draft);
+    recoverySelection = draft.selectedId;
+  });
 
   const unsubscribe = subscribeMetrics({
     onBatch: (batch: MetricsBatch) => {
@@ -59,6 +68,11 @@
       history.push(batch.samples ?? []);
       rows = history.current();
       revision++;
+      if (recoverySelection) {
+        const target = rows.find((r) => r.containerId === recoverySelection);
+        recoverySelection = null;
+        if (target) void showProcesses(target);
+      }
     },
     onLagged: (dropped) => {
       // Do not interpolate: record the hole so charts break their line and the
@@ -150,8 +164,6 @@
     return unit === 0 ? `${n} B` : `${value.toFixed(1)} ${units[unit]}`;
   }
 
-  type Tab = "live" | "actions";
-  let tab = $state<Tab>("live");
 </script>
 
 <div class="content-header" data-tauri-drag-region>
@@ -273,7 +285,7 @@
 
   {#if tab === "actions"}
     <div class="panel">
-      <ActionFeed />
+      <ActionFeed bind:kind={historyKind} />
     </div>
   {/if}
 </div>

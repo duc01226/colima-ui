@@ -28,7 +28,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 tower-http = { version = "0.7", features = ["cors"] }
-serde_yml = "0.0.12"
+serde_norway = "0.9.42"
 libc = "0.2"
 bollard = "0.21"
 futures-util = "0.3"
@@ -60,6 +60,9 @@ tauri-plugin-notification = "2"
 # the user re-signs-in each launch (see account_session.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Pipes", "Win32_Globalization", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authorization"] }
 
 # `tower::ServiceExt::oneshot` drives the router in-process, so the tests in
 # `api_server` can assert which routes are reachable without a credential.

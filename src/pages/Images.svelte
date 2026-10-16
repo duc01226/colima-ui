@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { dockerApi, sysMethods } from "../lib/api";
+  import { dockerApi, sysMethods, type DockerImage } from "../lib/api";
   import { globalToast } from "../lib/globalToast";
   import { dockerState } from "../store.svelte";
   import * as Icons from "../components/Icons.svelte";
@@ -8,13 +8,17 @@
   import { formatTimestamp, formatSize, truncateId } from "../lib/formatters";
   import { viewInTopology } from "../lib/topology-link";
   import { columnResize } from "../lib/columnResize";
-  import { blockingCapability, capabilityNotice } from "../store/capabilities.svelte";
+  import { blockingCapability, capabilityNotice, isDockerOnlyHost } from "../store/capabilities.svelte";
+  import { refetchAllResources } from "../lib/dataPoller";
   import TransferDialog from "../components/transfer/TransferDialog.svelte";
   import type { TransferMode } from "../lib/api/transfer";
+  import { recoveryDraft } from "../lib/recoveryDrafts.svelte";
 
   let searchTerm = $state("");
   let showPull = $state(false);
   let pullName = $state("");
+  let pulling = $state(false);
+  let pullRevision = 0;
   let actionLoading = $state<string | null>(null);
   let inspecting = $state<string | null>(null);
   let inspectData = $state<string>("");
@@ -25,11 +29,23 @@
   let confirm = $state<{ title: string; message: string; confirmLabel: string; danger: boolean; onConfirm: () => void; onCancel?: () => void } | null>(null);
   let runtimeName = $state("docker");
   /** Which transfer dialog is open, if any. Export carries the current selection. */
-  let transfer = $state<{ mode: TransferMode; images: string[] } | null>(null);
+  let transfer = $state<{ mode: TransferMode; targets: { id: string; reference: string }[] } | null>(null);
+
+  recoveryDraft("image-input", () => ({ searchTerm, showPull, pullName, transfer, showTag, tagTarget, selected: [...selected], inspecting }), (draft) => {
+    ({ searchTerm, showPull, pullName, tagTarget } = draft);
+    // A mutable tag on the same daemon can now identify different content.
+    // Reopening an old export requires every original content/reference pair.
+    if (draft.transfer && (draft.transfer.mode !== "export" || draft.transfer.targets.every((target) =>
+      dockerState.images.some((image) => image.Id === target.id && imageReference(image) === target.reference)))) transfer = draft.transfer;
+    if (draft.showTag && dockerState.images.some((image) => image.Id === draft.showTag)) showTag = draft.showTag;
+    selected = new Set(draft.selected.filter((id) => dockerState.images.some((image) => image.Id === id)));
+    if (draft.inspecting && dockerState.images.some((image) => image.Id === draft.inspecting)) void handleInspect(draft.inspecting);
+  });
 
   
 
   async function refreshImages() {
+    if (isDockerOnlyHost()) return refetchAllResources();
     try {
       const list = await dockerApi.listImages();
       dockerState.images = list;
@@ -68,27 +84,37 @@
     };
   });
 
+  let selectionFilterInitialized = false;
   $effect(() => {
     // Clear selection on search change
     if (searchTerm !== undefined) {
-      selected = new Set();
+      if (selectionFilterInitialized) selected = new Set();
+      selectionFilterInitialized = true;
     }
   });
 
   async function handlePull(overrideName?: string) {
-    const name = (typeof overrideName === 'string' ? overrideName : pullName).trim();
-    if (!name) return;
+    const fromForm = typeof overrideName !== "string";
+    const name = (fromForm ? pullName : overrideName).trim();
+    if (!name || (fromForm && pulling)) return;
+    const submittedDraft = pullName;
+    const submittedRevision = pullRevision;
+    if (fromForm) pulling = true;
     globalToast("success", `Pulling image "${name}"... This may take a moment.`);
-    pullName = "";
-    showPull = false;
     try {
       await dockerApi.pullImage(name);
       globalToast("success", `Image "${name}" pulled successfully`);
+      if (fromForm && pullRevision === submittedRevision && pullName === submittedDraft) {
+        pullName = "";
+        showPull = false;
+      }
       refreshImages();
     } catch (e) {
       globalToast("error", `Pull failed: ${e}`);
-      throw e;
-    }
+      // Automation's caller reports failure; the form already reports it here
+      // and must remain usable rather than triggering the global boundary.
+      if (!fromForm) throw e;
+    } finally { if (fromForm) pulling = false; }
   }
 
   async function handleRemove(imageId: string, name: string, forceDelete: boolean = false) {
@@ -222,12 +248,15 @@
    * `docker save` takes references, not ids. A dangling image has no usable tag,
    * so fall back to its id — that is what the CLI accepts for those.
    */
-  function exportTargets(): string[] {
+  function imageReference(image: DockerImage): string {
+    return image.Repository && image.Repository !== "<none>" && image.Tag && image.Tag !== "<none>"
+      ? `${image.Repository}:${image.Tag}` : image.Id;
+  }
+
+  function exportTargets(): { id: string; reference: string }[] {
     return filteredImages
       .filter(i => selected.has(i.Id))
-      .map(i => (i.Repository && i.Repository !== "<none>" && i.Tag && i.Tag !== "<none>")
-        ? `${i.Repository}:${i.Tag}`
-        : i.Id);
+      .map(i => ({ id: i.Id, reference: imageReference(i) }));
   }
 
   let filteredImages = $derived(dockerState.images.filter(img => {
@@ -275,10 +304,10 @@
   <div class="content-header-actions">
     <input class="input header-search" placeholder={t('images.search', { default: 'Search images...' })} bind:value={searchTerm} />
     <button class="btn btn-ghost" onclick={handlePrune} disabled={actionLoading === "prune"}>{actionLoading === "prune" ? t('images.pruning', { default: 'Pruning...' }) : t('images.prune', { default: 'Prune' })}</button>
-    <button class="btn btn-ghost" onclick={() => transfer = { mode: "import", images: [] }}>{t('images.import', { default: 'Import TAR' })}</button>
+    <button class="btn btn-ghost" onclick={() => transfer = { mode: "import", targets: [] }}>{t('images.import', { default: 'Import TAR' })}</button>
     <!-- Export needs a selection: exporting "whatever is on screen" would be a
          surprising several-gigabyte write. -->
-    <button class="btn btn-ghost" disabled={selected.size === 0} onclick={() => transfer = { mode: "export", images: exportTargets() }}>{t('images.export', { default: 'Export TAR' })}</button>
+    <button class="btn btn-ghost" disabled={selected.size === 0} onclick={() => transfer = { mode: "export", targets: exportTargets() }}>{t('images.export', { default: 'Export TAR' })}</button>
     <button class="btn btn-primary" onclick={() => showPull = !showPull}>{t('images.pull', { default: 'Pull Image' })}</button>
   </div>
 </div>
@@ -290,9 +319,9 @@
       <div style="display: flex; gap: 12px; align-items: flex-end;">
         <div style="flex: 1;">
           <label for="pullImageName" style="display: block; font-size: var(--text-sm); color: var(--text-secondary); margin-bottom: 4px;">{t('images.name', { default: 'Image name' })}</label>
-          <input id="pullImageName" class="input" bind:value={pullName} placeholder="nginx:latest, ubuntu:22.04, docker.io/library/redis..." style="width: 100%;" onkeydown={(e) => e.key === 'Enter' && handlePull()} autofocus />
+          <input id="pullImageName" class="input" bind:value={pullName} oninput={() => pullRevision++} placeholder="nginx:latest, ubuntu:22.04, docker.io/library/redis..." style="width: 100%;" onkeydown={(e) => e.key === 'Enter' && handlePull()} autofocus />
         </div>
-        <button class="btn btn-primary" onclick={() => handlePull()} disabled={!pullName.trim()}>{t('images.pull_action', { default: 'Pull' })}</button>
+        <button class="btn btn-primary" onclick={() => handlePull()} disabled={pulling || !pullName.trim()}>{t('images.pull_action', { default: 'Pull' })}</button>
         <button class="btn btn-ghost" onclick={() => showPull = false}>{t('images.cancel', { default: 'Cancel' })}</button>
       </div>
     </div>
@@ -368,7 +397,7 @@
       </div>
     </div>
   {:else}
-    {@const blocked = searchTerm ? undefined : blockingCapability("colima", "docker")}
+    {@const blocked = blockingCapability("colima", "docker")}
     <div class="empty-state">
       {#if blocked}
         <div class="empty-state-title">{capabilityNotice(blocked).title}</div>
@@ -397,7 +426,8 @@
 {#if transfer}
   <TransferDialog
     mode={transfer.mode}
-    images={transfer.images}
+    images={transfer.targets.map((target) => target.reference)}
+    imageIds={transfer.targets.map((target) => target.id)}
     onClose={() => {
       // No refresh here any more: this now fires when the transfer *starts*, and
       // an import has added nothing yet. `transferNotifications` refreshes when a

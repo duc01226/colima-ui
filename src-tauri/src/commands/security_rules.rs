@@ -76,11 +76,15 @@ pub enum Check {
     NoHealthcheck,
     PrivilegedPort,
     AddInsteadOfCopy,
-    ExcessiveLayers { max: usize },
+    ExcessiveLayers {
+        max: usize,
+    },
     NoDigestPin,
     MutableTag,
     MissingSourceLabel,
-    OlderThanDays { days: i64 },
+    OlderThanDays {
+        days: i64,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -175,10 +179,19 @@ pub struct RuleResult {
 /// the secret it found has published it into a notification list, a diagnostic
 /// bundle and a screenshot.
 const SECRET_NAME_HINTS: &[&str] = &[
-    "SECRET", "PASSWORD", "PASSWD", "TOKEN", "APIKEY", "API_KEY", "PRIVATE_KEY",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "TOKEN",
+    "APIKEY",
+    "API_KEY",
+    "PRIVATE_KEY",
     // Not a bare "AUTH": that also matches AUTHOR, AUTHORS and MAINTAINER_AUTHOR,
     // and a rule that fires on an author's name is a rule people learn to ignore.
-    "ACCESS_KEY", "CREDENTIAL", "AUTH_TOKEN", "AUTHORIZATION",
+    "ACCESS_KEY",
+    "CREDENTIAL",
+    "AUTH_TOKEN",
+    "AUTHORIZATION",
 ];
 
 /// Names that match a hint but are routinely not credentials.
@@ -220,8 +233,8 @@ fn is_mutable_tag(image_ref: &str) -> bool {
     }
     // Names that conventionally track something rather than name a release.
     const ROLLING: &[&str] = &[
-        "latest", "stable", "edge", "main", "master", "dev", "devel", "nightly",
-        "current", "unstable", "rolling", "beta", "alpha",
+        "latest", "stable", "edge", "main", "master", "dev", "devel", "nightly", "current",
+        "unstable", "rolling", "beta", "alpha",
     ];
     if ROLLING.contains(&tag) {
         return true;
@@ -229,7 +242,10 @@ fn is_mutable_tag(image_ref: &str) -> bool {
     // A major- or minor-only version (`1`, `1.27`) is republished as patches
     // land, so it moves as surely as `latest` does.
     let parts: Vec<&str> = tag.split('.').collect();
-    parts.len() <= 2 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    parts.len() <= 2
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn days_since(created: &str, now_ms: i64) -> Option<i64> {
@@ -265,7 +281,10 @@ fn zone_offset_minutes(s: &str) -> Option<i64> {
         return None;
     }
     let sign = if tail.as_bytes()[idx] == b'-' { -1 } else { 1 };
-    let digits: String = tail[idx + 1..].chars().filter(|c| c.is_ascii_digit()).collect();
+    let digits: String = tail[idx + 1..]
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect();
     if digits.len() != 4 {
         return None;
     }
@@ -357,20 +376,40 @@ pub fn evaluate(facts: &ImageFacts, level: Level, now_ms: i64) -> Evaluation {
         let (passed, evidence) = match &rule.check {
             Check::RunsAsRoot => {
                 let user = facts.user.as_deref().unwrap_or("").trim().to_string();
-                let is_root = user.is_empty() || user == "root" || user.starts_with("0:") || user == "0";
-                (!is_root, is_root.then(|| {
-                    if user.is_empty() { "no USER instruction".to_string() } else { format!("USER {}", user) }
-                }))
+                let is_root =
+                    user.is_empty() || user == "root" || user.starts_with("0:") || user == "0";
+                (
+                    !is_root,
+                    is_root.then(|| {
+                        if user.is_empty() {
+                            "no USER instruction".to_string()
+                        } else {
+                            format!("USER {}", user)
+                        }
+                    }),
+                )
             }
             Check::SecretLikeEnv => {
-                let names: Vec<String> = facts.env.iter().filter_map(|e| looks_like_secret(e)).collect();
+                let names: Vec<String> = facts
+                    .env
+                    .iter()
+                    .filter_map(|e| looks_like_secret(e))
+                    .collect();
                 let hit = !names.is_empty();
                 // Names only. The value is the thing we are warning about.
                 (!hit, hit.then(|| names.join(", ")))
             }
-            Check::NoHealthcheck => (facts.has_healthcheck, (!facts.has_healthcheck).then(|| "no HEALTHCHECK".to_string())),
+            Check::NoHealthcheck => (
+                facts.has_healthcheck,
+                (!facts.has_healthcheck).then(|| "no HEALTHCHECK".to_string()),
+            ),
             Check::PrivilegedPort => {
-                let low: Vec<String> = facts.exposed_ports.iter().filter(|p| **p < 1024).map(|p| p.to_string()).collect();
+                let low: Vec<String> = facts
+                    .exposed_ports
+                    .iter()
+                    .filter(|p| **p < 1024)
+                    .map(|p| p.to_string())
+                    .collect();
                 let hit = !low.is_empty();
                 (!hit, hit.then(|| low.join(", ")))
             }
@@ -392,7 +431,9 @@ pub fn evaluate(facts: &ImageFacts, level: Level, now_ms: i64) -> Evaluation {
             }
             Check::MissingSourceLabel => {
                 let hit = !facts.labels.contains_key("org.opencontainers.image.source")
-                    && !facts.labels.contains_key("org.opencontainers.image.revision");
+                    && !facts
+                        .labels
+                        .contains_key("org.opencontainers.image.revision");
                 (!hit, hit.then(|| "no source or revision label".to_string()))
             }
             Check::OlderThanDays { days } => {
@@ -427,7 +468,10 @@ pub fn evaluate(facts: &ImageFacts, level: Level, now_ms: i64) -> Evaluation {
             evidence,
         });
     }
-    Evaluation { results: out, skipped }
+    Evaluation {
+        results: out,
+        skipped,
+    }
 }
 
 // ===== Gathering facts from the runtime =====
@@ -471,9 +515,13 @@ struct HistoryLine {
 }
 
 /// Parse `docker image inspect --format {{json .}}` output into facts.
-pub fn facts_from_inspect(image_ref: &str, inspect_json: &str, history_json: &str) -> Result<ImageFacts, String> {
-    let inspect: Inspect =
-        serde_json::from_str(inspect_json).map_err(|e| format!("Cannot read image config: {}", e))?;
+pub fn facts_from_inspect(
+    image_ref: &str,
+    inspect_json: &str,
+    history_json: &str,
+) -> Result<ImageFacts, String> {
+    let inspect: Inspect = serde_json::from_str(inspect_json)
+        .map_err(|e| format!("Cannot read image config: {}", e))?;
     let config = inspect.config.unwrap_or(InspectConfig {
         user: None,
         healthcheck: None,
@@ -508,7 +556,10 @@ pub fn facts_from_inspect(image_ref: &str, inspect_json: &str, history_json: &st
         labels: config.labels.unwrap_or_default(),
         created: inspect.created,
         repo_digests: inspect.repo_digests.unwrap_or_default(),
-        layer_count: inspect.root_fs.and_then(|r| r.layers).map_or(0, |l| l.len()),
+        layer_count: inspect
+            .root_fs
+            .and_then(|r| r.layers)
+            .map_or(0, |l| l.len()),
         history,
     })
 }
@@ -517,11 +568,21 @@ pub fn facts_from_inspect(image_ref: &str, inspect_json: &str, history_json: &st
 ///
 /// Blocking; call it from `helpers::run_blocking`.
 pub fn collect_facts_blocking(image_ref: &str) -> Result<ImageFacts, String> {
-    let mut inspect_cmd = crate::commands::runtime::get_runtime_cmd();
-    inspect_cmd.args(["image", "inspect", "--format", "{{json .}}", "--", image_ref]);
-    let inspect = inspect_cmd
-        .output()
-        .map_err(|e| crate::redact::redact_err("Cannot inspect image", e))?;
+    let mut inspect_cmd = crate::commands::runtime::get_runtime_cmd()?;
+    inspect_cmd.args([
+        "image",
+        "inspect",
+        "--format",
+        "{{json .}}",
+        "--",
+        image_ref,
+    ]);
+    let inspect = crate::child_process::capture(
+        inspect_cmd,
+        std::time::Duration::from_secs(10),
+        16 * 1024 * 1024,
+    )
+    .map_err(|e| crate::redact::redact_err("Cannot inspect image", e))?;
     if !inspect.status.success() {
         // "No such image" and "the daemon is not running" are different problems
         // with different fixes, and telling someone to pull an image when the
@@ -536,13 +597,31 @@ pub fn collect_facts_blocking(image_ref: &str) -> Result<ImageFacts, String> {
         return Err(crate::redact::redact(stderr.trim()));
     }
 
-    let mut history_cmd = crate::commands::runtime::get_runtime_cmd();
-    history_cmd.args(["image", "history", "--no-trunc", "--format", "{{json .}}", "--", image_ref]);
+    let mut history_cmd = crate::commands::runtime::get_runtime_cmd()?;
+    history_cmd.args([
+        "image",
+        "history",
+        "--no-trunc",
+        "--format",
+        "{{json .}}",
+        "--",
+        image_ref,
+    ]);
     // History is best-effort: without it two rules lose their input, which is a
     // better outcome than refusing to evaluate the other ten.
-    let history = history_cmd.output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    let history = crate::child_process::capture(
+        history_cmd,
+        std::time::Duration::from_secs(10),
+        16 * 1024 * 1024,
+    )
+    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+    .unwrap_or_default();
 
-    facts_from_inspect(image_ref, &String::from_utf8_lossy(&inspect.stdout), &history)
+    facts_from_inspect(
+        image_ref,
+        &String::from_utf8_lossy(&inspect.stdout),
+        &history,
+    )
 }
 
 #[cfg(test)]
@@ -591,16 +670,29 @@ mod tests {
     #[test]
     fn a_well_built_image_passes_everything() {
         let results = evaluate(&facts(), Level::L3, NOW_MS).results;
-        let failed: Vec<&str> = results.iter().filter(|r| !r.passed).map(|r| r.rule_id.as_str()).collect();
+        let failed: Vec<&str> = results
+            .iter()
+            .filter(|r| !r.passed)
+            .map(|r| r.rule_id.as_str())
+            .collect();
         assert!(failed.is_empty(), "unexpected failures: {:?}", failed);
     }
 
     #[test]
     fn root_is_detected_however_it_is_spelled() {
-        for user in [None, Some("".to_string()), Some("root".to_string()), Some("0".to_string()), Some("0:0".to_string())] {
+        for user in [
+            None,
+            Some("".to_string()),
+            Some("root".to_string()),
+            Some("0".to_string()),
+            Some("0:0".to_string()),
+        ] {
             let f = ImageFacts { user, ..facts() };
             let r = evaluate(&f, Level::L1, NOW_MS).results;
-            let root = r.iter().find(|r| r.rule_id == "runs-as-root").expect("rule");
+            let root = r
+                .iter()
+                .find(|r| r.rule_id == "runs-as-root")
+                .expect("rule");
             assert!(!root.passed, "root must be detected");
         }
     }
@@ -616,7 +708,10 @@ mod tests {
             ..facts()
         };
         let r = evaluate(&f, Level::L1, NOW_MS).results;
-        let secret = r.iter().find(|r| r.rule_id == "secret-like-env").expect("rule");
+        let secret = r
+            .iter()
+            .find(|r| r.rule_id == "secret-like-env")
+            .expect("rule");
         assert!(!secret.passed);
         let evidence = secret.evidence.clone().unwrap_or_default();
         assert!(evidence.contains("DB_PASSWORD"));
@@ -654,17 +749,29 @@ mod tests {
         // Every image ever built has this line; flagging it would make the rule
         // fire on everything and mean nothing.
         assert!(!is_avoidable_add("/bin/sh -c #(nop) ADD file:abc123 in / "));
-        assert!(is_avoidable_add("/bin/sh -c #(nop) ADD https://example.test/x.tar /opt/"));
+        assert!(is_avoidable_add(
+            "/bin/sh -c #(nop) ADD https://example.test/x.tar /opt/"
+        ));
         assert!(is_avoidable_add("ADD app.tar /srv"));
     }
 
     #[test]
     fn age_rules_stack_so_an_old_image_loses_more_than_a_stale_one() {
-        let old = ImageFacts { created: Some("2020-01-01T00:00:00Z".into()), ..facts() };
-        let stale = ImageFacts { created: Some("2026-01-01T00:00:00Z".into()), ..facts() };
+        let old = ImageFacts {
+            created: Some("2020-01-01T00:00:00Z".into()),
+            ..facts()
+        };
+        let stale = ImageFacts {
+            created: Some("2026-01-01T00:00:00Z".into()),
+            ..facts()
+        };
 
         let failed = |f: &ImageFacts| -> usize {
-            evaluate(f, Level::L1, NOW_MS).results.iter().filter(|r| !r.passed).count()
+            evaluate(f, Level::L1, NOW_MS)
+                .results
+                .iter()
+                .filter(|r| !r.passed)
+                .count()
         };
         assert_eq!(failed(&old), 3, "90, 180 and 365 day rules all fail");
         assert_eq!(failed(&stale), 2, "over 180 days, under a year");
@@ -672,15 +779,29 @@ mod tests {
 
     #[test]
     fn an_unreadable_build_date_does_not_accuse_the_image() {
-        let f = ImageFacts { created: Some("not a date".into()), ..facts() };
+        let f = ImageFacts {
+            created: Some("not a date".into()),
+            ..facts()
+        };
         let r = evaluate(&f, Level::L1, NOW_MS).results;
-        assert!(r.iter().filter(|r| r.rule_id.starts_with("built-over")).all(|r| r.passed));
+        assert!(r
+            .iter()
+            .filter(|r| r.rule_id.starts_with("built-over"))
+            .all(|r| r.passed));
     }
 
     #[test]
     fn a_stricter_level_only_adds_rules() {
-        let l1: Vec<String> = evaluate(&facts(), Level::L1, NOW_MS).results.iter().map(|r| r.rule_id.clone()).collect();
-        let l3: Vec<String> = evaluate(&facts(), Level::L3, NOW_MS).results.iter().map(|r| r.rule_id.clone()).collect();
+        let l1: Vec<String> = evaluate(&facts(), Level::L1, NOW_MS)
+            .results
+            .iter()
+            .map(|r| r.rule_id.clone())
+            .collect();
+        let l3: Vec<String> = evaluate(&facts(), Level::L3, NOW_MS)
+            .results
+            .iter()
+            .map(|r| r.rule_id.clone())
+            .collect();
         assert!(l3.len() > l1.len());
         for id in &l1 {
             assert!(l3.contains(id), "L3 dropped {}", id);

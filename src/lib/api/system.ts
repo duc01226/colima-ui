@@ -16,7 +16,8 @@ export type CapabilityState =
   | "missing"
   | "installed_not_running"
   | "running"
-  | "unknown";
+  | "unknown"
+  | "unsupported";
 
 /** Mirrors `Capability` in `src-tauri/src/commands/system_capabilities.rs`. */
 export interface Capability {
@@ -167,4 +168,35 @@ export const sysMethods = {
     call<{ containers_json: string }>("load_preset_snapshot", { presetId, instanceProfile: profile }, "GET", "/api/presets/snapshot", { preset_id: presetId, instance_profile: profile }),
   listAllPresetSnapshots: (profile: string) =>
     call<string>("list_all_preset_snapshots", { instanceProfile: profile }, "GET", "/api/presets/snapshots", { profile }),
+};
+
+export interface EngineStatus {
+  context: string | null;
+  endpoint: string | null;
+  engine_id: string | null;
+  generation: number | null;
+  ready: boolean;
+  error: string | null;
+}
+export interface EngineContextChoice { name: string; supported: boolean; reason: string | null }
+export interface ConnectionSettings {
+  active: EngineStatus;
+  pending: string | null;
+  contexts: EngineContextChoice[];
+  discovery_error: string | null;
+}
+
+// Native connection/restart control has no public HTTP equivalent.
+async function connectionCall<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  const { getInvoke, isTauri } = await import("./client");
+  if (!isTauri()) throw new Error("Connection preferences require the desktop app");
+  const invoke = await getInvoke();
+  if (!invoke) throw new Error("Desktop connection control is unavailable");
+  return await invoke(command, args) as T;
+}
+export const connectionApi = {
+  get: () => connectionCall<ConnectionSettings>("get_engine_connection"),
+  check: (context: string) => connectionCall<EngineStatus>("check_engine_connection", { context }),
+  save: (context: string) => connectionCall<void>("save_engine_connection", { context }),
+  restart: (cancelTransfers = false) => connectionCall<void>("restart_for_engine", { cancelTransfers }),
 };
